@@ -1,0 +1,35 @@
+[package]
+name = "velox-core"
+description = "Velox download engine: dynamic segmentation, rate limiting, HLS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "rustls-tls", "stream", "socks"] }
+futures-util = "0.3"
+bytes = "1"
+tokio-util = "0.7"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+percent-encoding = "2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+m3u8-rs = "6"
+aes = "0.8"
+cbc = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+dirs = "5"
+which = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl"] }
+
+[dev-dependencies]
+tempfile = "3"

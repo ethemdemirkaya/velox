@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark" />
+    <title>Velox</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <div class="brand">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 3h4.1L12 12.4 16.9 3H21L12 18.6z" fill="#f2f2f2" />
+          <rect x="10.6" y="19.6" width="2.8" height="2.8" fill="#ff3b30" />
+        </svg>
+        <span>Velox</span>
+      </div>
+      <span id="status" class="pill"><i></i><span data-i18n="checking">Checking…</span></span>
+    </header>
+
+    <section id="offline" class="notice" hidden>
+      <b data-i18n="offTitle">Velox app not found</b>
+      <p data-i18n="offBody">Install and open the Velox desktop app once so the browser bridge is registered.</p>
+      <a href="https://github.com/ethemdemirkaya/velox/releases/latest" target="_blank" class="btn primary" data-i18n="get">Get Velox</a>
+    </section>
+
+    <section class="row">
+      <div>
+        <div class="t" data-i18n="capture">Capture downloads</div>
+        <div class="h" data-i18n="altHint">Hold Alt while clicking to skip</div>
+      </div>
+      <button id="toggle" class="tg" role="switch" aria-checked="true"><span></span></button>
+    </section>
+
+    <section class="media">
+      <div class="label"><span data-i18n="media">Media on this page</span><span id="count"></span></div>
+      <div id="list"></div>
+      <div id="empty" class="empty" data-i18n="none">No video or audio streams detected yet. Start playing a video.</div>
+    </section>
+
+    <footer>
+      <button id="open" class="btn" data-i18n="open">Open Velox</button>
+      <span id="ver" class="faint"></span>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

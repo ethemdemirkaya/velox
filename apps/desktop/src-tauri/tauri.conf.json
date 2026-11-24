@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Velox",
+  "version": "0.1.0",
+  "identifier": "dev.velox.app",
+  "build": {
+    "beforeDevCommand": "npm run sidecar && npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run sidecar -- --release && npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Velox",
+        "width": 1220,
+        "height": 780,
+        "minWidth": 900,
+        "minHeight": 580,
+        "decorations": false,
+        "visible": false,
+        "center": true,
+        "backgroundColor": "#0A0A0A"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi", "deb", "appimage", "dmg"],
+    "category": "Utility",
+    "shortDescription": "Blazing-fast download manager",
+    "longDescription": "Velox is an open-source download accelerator written in Rust with dynamic segmentation, browser integration and stream capture.",
+    "copyright": "© 2026 Ethem Demirkaya — MIT OR Apache-2.0",
+    "createUpdaterArtifacts": true,
+    "externalBin": ["binaries/velox-host"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": { "installMode": "currentUser" }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE2RkMxMzk3NDg3NzBCMDIKUldRQ0MzZElseFA4RnFCYUFIcVpqUlNqZSs0SXg5djlMMGQxNHdhZkhuODBGZkJFYTNnMldWL00K",
+      "endpoints": ["https://github.com/ethemdemirkaya/velox/releases/latest/download/latest.json"]
+    }
+  }
+}

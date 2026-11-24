@@ -1,0 +1,11 @@
+[package]
+name = "velox-host"
+description = "Native messaging bridge between the Velox browser extension and the Velox app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+interprocess = "2"
