@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import Icon from "./Icon.svelte";
   import FileIcon from "./FileIcon.svelte";
+  import QualityPicker from "./QualityPicker.svelte";
   import { api, type ProbeInfo } from "../lib/api";
   import { store } from "../lib/store.svelte";
   import { t } from "../lib/i18n.svelte";
@@ -15,6 +16,7 @@
   let fileName = $state("");
   let dir = $state("");
   let busy = $state(false);
+  let quality = $state<string | null>(null);
   let input: HTMLTextAreaElement;
 
   const urls = $derived(
@@ -41,6 +43,7 @@
         if (my !== seq) return;
         probe = p;
         fileName = p.fileName;
+        quality = p.qualities[0]?.id ?? null;
         dir = p.dir;
       } catch (e) {
         if (my === seq) error = String(e);
@@ -86,6 +89,7 @@
           dir: dir || null,
           startPaused: paused,
           kind: probe?.kind ?? null,
+          quality,
         });
         toasts.push({ kind: "info", title: t("toast.added", { name: fileName || single }), timeout: 2500 });
       } else {
@@ -161,6 +165,13 @@
         </div>
       {:else if urls.length > 1}
         <div class="probe"><Icon name="link" size={15} /><span>{t("add.multi", { n: urls.length })}</span></div>
+      {/if}
+
+      {#if single && probe && probe.qualities.length > 1}
+        <div class="quality">
+          <span class="label">{t("add.quality")}</span>
+          <QualityPicker options={probe.qualities} bind:value={quality} />
+        </div>
       {/if}
 
       <div class="grid">
@@ -266,6 +277,9 @@
   .dir {
     display: flex;
     gap: 6px;
+  }
+  .quality {
+    margin-top: 16px;
   }
   .dir .input {
     font-size: 11.5px;

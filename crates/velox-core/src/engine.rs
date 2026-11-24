@@ -94,6 +94,7 @@ struct Resolved {
     etag: Option<String>,
     last_modified: Option<String>,
     final_url: String,
+    qualities: Vec<site::QualityOption>,
 }
 
 fn build_client(s: &Settings) -> Client {
@@ -277,7 +278,7 @@ impl Engine {
             if tools::ytdlp().is_none() || (tools::ffmpeg().is_none() && cfg!(windows)) {
                 Box::pin(self.install_tools()).await.map_err(|e| format!("could not install video tools: {e}"))?;
             }
-            let r = site::resolve(&url).await?;
+            let r = site::resolve(&url, req.quality.as_deref()).await?;
             let stem: String = util::sanitize(&r.title).chars().take(150).collect();
             return Ok(Resolved {
                 file_name: format!("{stem}.{}", r.ext),
@@ -289,6 +290,7 @@ impl Engine {
                 content_type: None,
                 etag: None,
                 last_modified: None,
+                qualities: r.qualities,
             });
         }
         if kind != Kind::Http {
@@ -302,6 +304,7 @@ impl Engine {
                 content_type: None,
                 etag: None,
                 last_modified: None,
+                qualities: vec![],
             });
         }
         let client = self.0.client.read().clone();
@@ -318,6 +321,7 @@ impl Engine {
                 etag: None,
                 last_modified: None,
                 final_url: p.final_url,
+                qualities: vec![],
             });
         }
         let file_name = req.file_name.as_deref().map(util::sanitize).filter(|s| !s.is_empty()).unwrap_or(p.file_name);
@@ -331,6 +335,7 @@ impl Engine {
             etag: p.etag,
             last_modified: p.last_modified,
             final_url: p.final_url,
+            qualities: vec![],
         })
     }
 
@@ -348,6 +353,7 @@ impl Engine {
             content_type: r.content_type,
             kind: r.kind,
             dir: dir.to_string_lossy().into_owned(),
+            qualities: r.qualities,
         })
     }
 
@@ -379,6 +385,7 @@ impl Engine {
             headers: req.headers,
             connections: req.connections.unwrap_or_else(|| auto_connections(r.total)).clamp(1, MAX_CONNECTIONS),
             speed_limit: req.speed_limit.unwrap_or(0),
+            quality: req.quality.clone(),
             error: None,
             created_at: util::now_ms(),
             finished_at: None,
@@ -516,11 +523,11 @@ impl Engine {
         cancel: CancellationToken,
         path: &Path,
     ) -> Result<Option<String>, DlError> {
-        let r = site::resolve(&rec.url).await.map_err(DlError::Other)?;
+        let r = site::resolve(&rec.url, rec.quality.as_deref()).await.map_err(DlError::Other)?;
         let path = path.with_extension(&r.ext);
         let ctx = site::SiteCtx { client, live, global: self.0.global.clone(), cancel, conns: rec.connections };
         if r.needs_ytdlp() {
-            let out = site::ytdlp_download(&ctx, &rec.url, &path).await?;
+            let out = site::ytdlp_download(&ctx, &rec.url, rec.quality.as_deref(), &path).await?;
             return Ok(out.file_name().map(|s| s.to_string_lossy().into_owned()));
         }
         let parts = site::download(&ctx, &r, &path, rec.hls_done as usize, &rec.segments).await?;

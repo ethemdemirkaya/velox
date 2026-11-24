@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import Logo from "./Logo.svelte";
   import FileIcon from "./FileIcon.svelte";
+  import QualityPicker from "./QualityPicker.svelte";
   import { api, type AddRequest, type ProbeInfo } from "../lib/api";
   import { i18n, t } from "../lib/i18n.svelte";
   import { bytes, host } from "../lib/format";
@@ -17,6 +18,9 @@
   let fileName = $state("");
   let dir = $state("");
   let busy = $state(false);
+  let quality = $state<string | null>(null);
+  const qOpt = $derived(probe?.qualities.find((q) => q.id === quality) ?? null);
+  const shownSize = $derived(qOpt?.size ?? probe?.size ?? null);
 
   onMount(async () => {
     try {
@@ -27,6 +31,7 @@
       fileName = req.fileName ?? decodeURIComponent(new URL(req.url).pathname.split("/").filter(Boolean).pop() ?? "");
       probe = await api.probe(req);
       if (!req.fileName) fileName = probe.fileName;
+      quality = probe.qualities[0]?.id ?? null;
       dir = probe.dir;
     } catch (e) {
       error = String(e);
@@ -44,6 +49,7 @@
           fileName: fileName || null,
           dir: dir || null,
           kind: probe?.kind ?? req.kind ?? null,
+          quality,
           startPaused: action === "later",
         });
     } catch (e) {
@@ -86,7 +92,7 @@
           {#if error}
             <span class="err">{error}</span>
           {:else if probe}
-            <span class="num strong">{probe.size != null ? bytes(probe.size) : t("add.unknownSize")}</span>
+            <span class="num strong">{shownSize != null ? bytes(shownSize) : t("add.unknownSize")}</span>
             <span>·</span>
             <span
               >{probe.kind === "site"
@@ -105,6 +111,13 @@
         </div>
       </div>
     </div>
+
+    {#if probe && probe.qualities.length > 1}
+      <div class="field">
+        <span class="label">{t("add.quality")}</span>
+        <QualityPicker options={probe.qualities} bind:value={quality} />
+      </div>
+    {/if}
 
     <div class="field">
       <span class="label">{t("add.saveTo")}</span>

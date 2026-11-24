@@ -61,6 +61,14 @@ export interface AddRequest {
   speedLimit?: number | null;
   startPaused?: boolean;
   sizeHint?: number | null;
+  /** Video sites: "1080", "720", … or "audio". */
+  quality?: string | null;
+}
+
+export interface QualityOption {
+  id: string;
+  height: number | null;
+  size: number | null;
 }
 
 export interface ProbeInfo {
@@ -73,6 +81,7 @@ export interface ProbeInfo {
   kind: Kind;
   category: Category;
   dir: string;
+  qualities: QualityOption[];
 }
 
 export interface Settings {

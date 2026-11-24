@@ -53,12 +53,23 @@ impl Format {
     }
 }
 
+/// A quality the user can pick (video height, or audio only).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QualityOption {
+    /// "1080", "720", … or "audio".
+    pub id: String,
+    pub height: Option<u32>,
+    pub size: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Resolved {
     pub title: String,
     pub ext: String,
     pub formats: Vec<Format>,
     pub approx_size: Option<u64>,
+    pub qualities: Vec<QualityOption>,
 }
 
 impl Resolved {
@@ -74,14 +85,55 @@ impl Resolved {
 
 static CACHE: Mutex<Option<HashMap<String, (Instant, Resolved)>>> = Mutex::new(None);
 
-pub(crate) fn selector(have_ffmpeg: bool) -> &'static str {
-    // Prefer plain HTTPS files (segmented download = fastest), H.264/AAC in
-    // MP4 (plays everywhere); fall back to whatever the site offers (HLS...).
-    if have_ffmpeg {
-        "bv*[ext=mp4][protocol~='^https?$']+ba[ext=m4a][protocol~='^https?$']/b[vcodec!=none][acodec!=none][protocol~='^https?$']/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"
-    } else {
-        "b[vcodec!=none][acodec!=none][protocol~='^https?$']/b[vcodec!=none][acodec!=none]/b"
+/// yt-dlp format selector for a quality choice.
+///
+/// Prefers plain HTTPS files (segmented download = fastest) and H.264/AAC in
+/// MP4 (plays everywhere), then falls back to whatever the site offers (HLS…).
+/// `!=?` lets formats with unknown codecs through (X reports none for its
+/// progressive MP4s).
+pub(crate) fn selector(quality: Option<&str>, have_ffmpeg: bool) -> String {
+    const HTTP: &str = "[protocol~='^https?$']";
+    if quality == Some("audio") {
+        return format!("ba[ext=m4a]{HTTP}/ba[ext=m4a]/ba/b");
     }
+    let h = quality.and_then(|q| q.parse::<u32>().ok()).map(|h| format!("[height<=?{h}]")).unwrap_or_default();
+    if have_ffmpeg {
+        format!(
+            "bv*{h}[ext=mp4]{HTTP}+ba[ext=m4a]{HTTP}/b{h}[vcodec!=?none][acodec!=?none]{HTTP}/bv*{h}[ext=mp4]+ba[ext=m4a]/bv*{h}+ba/b{h}/b"
+        )
+    } else {
+        format!("b{h}[vcodec!=?none][acodec!=?none]{HTTP}/b{h}[vcodec!=?none][acodec!=?none]/b{h}/b")
+    }
+}
+
+/// Distinct video heights (best first) plus "audio only", with size estimates.
+fn qualities_of(v: &Value) -> Vec<QualityOption> {
+    let Some(list) = v.get("formats").and_then(Value::as_array) else { return vec![] };
+    let is_none = |f: &Value, k: &str| f.get(k).and_then(Value::as_str) == Some("none");
+    let best_audio = list
+        .iter()
+        .filter(|f| is_none(f, "vcodec") && !is_none(f, "acodec"))
+        .filter_map(size_of)
+        .max();
+    let mut by_height: std::collections::BTreeMap<u32, (Option<u64>, bool)> = Default::default();
+    for f in list.iter().filter(|f| !is_none(f, "vcodec")) {
+        let Some(h) = f.get("height").and_then(Value::as_u64).map(|h| h as u32) else { continue };
+        if h < 144 {
+            continue;
+        }
+        let has_audio = !is_none(f, "acodec") && f.get("acodec").is_some();
+        let size = size_of(f).map(|s| if has_audio { s } else { s + best_audio.unwrap_or(0) });
+        let e = by_height.entry(h).or_insert((None, false));
+        if size > e.0 {
+            *e = (size, true);
+        }
+    }
+    let mut out: Vec<QualityOption> =
+        by_height.into_iter().rev().map(|(h, (size, _))| QualityOption { id: h.to_string(), height: Some(h), size }).collect();
+    if best_audio.is_some() {
+        out.push(QualityOption { id: "audio".into(), height: None, size: best_audio });
+    }
+    out
 }
 
 fn format_of(f: &Value) -> Option<Format> {
@@ -112,8 +164,9 @@ fn size_of(v: &Value) -> Option<u64> {
     v.get("filesize").and_then(Value::as_u64).or_else(|| v.get("filesize_approx").and_then(Value::as_f64).map(|f| f as u64))
 }
 
-pub(crate) async fn resolve(url: &str) -> Result<Resolved, String> {
-    if let Some((t, r)) = CACHE.lock().get_or_insert_with(HashMap::new).get(url) {
+pub(crate) async fn resolve(url: &str, quality: Option<&str>) -> Result<Resolved, String> {
+    let key = format!("{url}#{}", quality.unwrap_or("best"));
+    if let Some((t, r)) = CACHE.lock().get_or_insert_with(HashMap::new).get(&key) {
         if t.elapsed() < Duration::from_secs(600) {
             return Ok(r.clone());
         }
@@ -121,7 +174,7 @@ pub(crate) async fn resolve(url: &str) -> Result<Resolved, String> {
     let ytdlp = tools::ytdlp().ok_or("yt-dlp is not installed")?;
     let ffmpeg = tools::ffmpeg();
     let mut cmd = tools::command(&ytdlp);
-    cmd.args(["-J", "--no-playlist", "--no-warnings", "-f", selector(ffmpeg.is_some())]);
+    cmd.args(["-J", "--no-playlist", "--no-warnings", "-f", &selector(quality, ffmpeg.is_some())]);
     cmd.arg(url);
     let out = tokio::time::timeout(Duration::from_secs(90), cmd.output())
         .await
@@ -160,14 +213,16 @@ pub(crate) async fn resolve(url: &str) -> Result<Resolved, String> {
     }
     .to_string();
     let approx_size = formats.iter().map(|f| f.size).sum::<Option<u64>>();
-    let r = Resolved { title, ext, formats, approx_size };
-    CACHE.lock().get_or_insert_with(HashMap::new).insert(url.to_string(), (Instant::now(), r.clone()));
+    let qualities = qualities_of(&v);
+    let r = Resolved { title, ext, formats, approx_size, qualities };
+    CACHE.lock().get_or_insert_with(HashMap::new).insert(key, (Instant::now(), r.clone()));
     Ok(r)
 }
 
 pub(crate) fn forget(url: &str) {
     if let Some(m) = CACHE.lock().as_mut() {
-        m.remove(url);
+        let prefix = format!("{url}#");
+        m.retain(|k, _| !k.starts_with(&prefix));
     }
 }
 
@@ -312,13 +367,13 @@ pub(crate) async fn merge(parts: &[std::path::PathBuf], out: &std::path::Path) -
 
 /// Last resort for protocols Velox can't fetch itself: let yt-dlp download
 /// (and merge) the whole thing while we relay its progress.
-pub(crate) async fn ytdlp_download(ctx: &SiteCtx, page: &str, base: &std::path::Path) -> Result<std::path::PathBuf, DlError> {
+pub(crate) async fn ytdlp_download(ctx: &SiteCtx, page: &str, quality: Option<&str>, base: &std::path::Path) -> Result<std::path::PathBuf, DlError> {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
     let ytdlp = tools::ytdlp().ok_or_else(|| DlError::Other("yt-dlp is not installed".into()))?;
     let mut cmd = tools::command(&ytdlp);
     let template = format!("{}.%(ext)s", base.with_extension("").display());
     cmd.args(["--no-playlist", "--no-warnings", "--newline", "--progress", "-N", "8", "--merge-output-format", "mp4"]);
-    cmd.args(["-f", selector(tools::ffmpeg().is_some())]);
+    cmd.args(["-f", &selector(quality, tools::ffmpeg().is_some())]);
     if let Some(ff) = tools::ffmpeg() {
         cmd.arg("--ffmpeg-location").arg(ff);
     }

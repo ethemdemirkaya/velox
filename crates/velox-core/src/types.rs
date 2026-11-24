@@ -69,6 +69,8 @@ pub struct AddRequest {
     pub start_paused: bool,
     /// Size already known from a probe – avoids an extra request.
     pub size_hint: Option<u64>,
+    /// Video sites: "1080", "720", … or "audio". `None` = best.
+    pub quality: Option<String>,
 }
 
 /// A byte range of a segmented download. Offsets are absolute.
@@ -125,6 +127,8 @@ pub struct Record {
     pub headers: Vec<(String, String)>,
     pub connections: u16,
     pub speed_limit: u64,
+    #[serde(default)]
+    pub quality: Option<String>,
     pub error: Option<String>,
     pub created_at: i64,
     pub finished_at: Option<i64>,
@@ -176,4 +180,6 @@ pub struct ProbeInfo {
     pub kind: Kind,
     pub category: Category,
     pub dir: String,
+    /// Video sites: available qualities, best first.
+    pub qualities: Vec<crate::site::QualityOption>,
 }

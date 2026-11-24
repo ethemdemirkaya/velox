@@ -112,7 +112,7 @@ pub async fn capture(app: &AppHandle, req: AddRequest, silent: bool) {
         let url = WebviewUrl::App(format!("index.html#/confirm/{token}").into());
         let res = WebviewWindowBuilder::new(app, format!("confirm-{token}"), url)
             .title("Velox")
-            .inner_size(540.0, 392.0)
+            .inner_size(560.0, 456.0)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)
