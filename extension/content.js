@@ -36,6 +36,14 @@
   // inside a post that links to its own permalink.
   function postUrlFor(video) {
     const h = location.hostname.replace(/^(www|m|mobile)\./, "");
+    if (h === "youtube.com") {
+      // Watch / Shorts pages are the video itself.
+      if (/^\/(watch|shorts\/|live\/)/.test(location.pathname)) return location.href;
+      // Home/search/channel hover previews and feed items link to their video.
+      const box = video.closest("ytd-video-preview, ytd-rich-item-renderer, ytd-video-renderer, ytd-reel-item-renderer, ytd-compact-video-renderer");
+      const a = box?.querySelector('a[href*="/watch"], a[href*="/shorts/"]');
+      return a ? new URL(a.getAttribute("href"), location.origin).href : null;
+    }
     if (h === "x.com" || h === "twitter.com") {
       const art = video.closest("article");
       const a = art && ([...art.querySelectorAll('a[href*="/status/"]')].find((x) => x.querySelector("time")) || art.querySelector('a[href*="/status/"]'));
