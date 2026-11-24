@@ -23,8 +23,14 @@ pub fn is_site_url(url: &str) -> bool {
     match host {
         "youtube.com" | "music.youtube.com" => path.starts_with("/watch") || path.starts_with("/shorts/") || path.starts_with("/live/"),
         "youtu.be" => path.len() > 1,
-        "vimeo.com" | "dailymotion.com" | "twitch.tv" | "clips.twitch.tv" | "tiktok.com" | "instagram.com" | "facebook.com"
-        | "x.com" | "twitter.com" | "reddit.com" | "soundcloud.com" | "bilibili.com" | "streamable.com" => path.len() > 1,
+        // Only individual posts – timelines/home pages are not videos.
+        "x.com" | "twitter.com" | "mobile.twitter.com" => path.contains("/status/"),
+        "instagram.com" => path.starts_with("/p/") || path.starts_with("/reel/") || path.starts_with("/reels/") || path.starts_with("/tv/"),
+        "tiktok.com" => path.contains("/video/"),
+        "facebook.com" => path.contains("/videos/") || path.starts_with("/watch") || path.starts_with("/reel/"),
+        "reddit.com" | "old.reddit.com" => path.contains("/comments/"),
+        "twitch.tv" => path.contains("/videos/") || path.contains("/clip/"),
+        "clips.twitch.tv" | "vimeo.com" | "dailymotion.com" | "soundcloud.com" | "bilibili.com" | "streamable.com" => path.len() > 1,
         _ => false,
     }
 }
@@ -262,5 +268,7 @@ mod tests {
         assert!(is_site_url("https://www.youtube.com/shorts/abc"));
         assert!(!is_site_url("https://www.youtube.com/"));
         assert!(!is_site_url("https://example.com/video.mp4"));
+        assert!(is_site_url("https://x.com/NASA/status/1234567890"));
+        assert!(!is_site_url("https://x.com/home"));
     }
 }

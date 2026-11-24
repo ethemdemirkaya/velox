@@ -153,8 +153,7 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
 // ─────────────────────────── video sites ───────────────────────────
 // Pages whose videos are resolved by Velox (yt-dlp) instead of sniffing.
 
-const SITE_HOSTS = ["vimeo.com", "dailymotion.com", "twitch.tv", "clips.twitch.tv", "tiktok.com", "instagram.com", "facebook.com", "x.com", "twitter.com", "reddit.com", "soundcloud.com", "bilibili.com", "streamable.com"];
-
+// Mirrors velox-core `site::is_site_url`: only pages that are one video.
 function isSiteUrl(url) {
   let u;
   try {
@@ -162,10 +161,38 @@ function isSiteUrl(url) {
   } catch {
     return false;
   }
-  const host = u.hostname.replace(/^(www|m)\./, "");
-  if (host === "youtube.com" || host === "music.youtube.com") return /^\/(watch|shorts\/|live\/)/.test(u.pathname);
-  if (host === "youtu.be") return u.pathname.length > 1;
-  return SITE_HOSTS.includes(host) && u.pathname.length > 1;
+  const host = u.hostname.replace(/^(www|m|mobile)\./, "");
+  const p = u.pathname;
+  switch (host) {
+    case "youtube.com":
+    case "music.youtube.com":
+      return /^\/(watch|shorts\/|live\/)/.test(p);
+    case "youtu.be":
+      return p.length > 1;
+    case "x.com":
+    case "twitter.com":
+      return p.includes("/status/");
+    case "instagram.com":
+      return /^\/(p|reels?|tv)\//.test(p);
+    case "tiktok.com":
+      return p.includes("/video/");
+    case "facebook.com":
+      return p.includes("/videos/") || p.startsWith("/watch") || p.startsWith("/reel/");
+    case "reddit.com":
+    case "old.reddit.com":
+      return p.includes("/comments/");
+    case "twitch.tv":
+      return p.includes("/videos/") || p.includes("/clip/");
+    case "clips.twitch.tv":
+    case "vimeo.com":
+    case "dailymotion.com":
+    case "soundcloud.com":
+    case "bilibili.com":
+    case "streamable.com":
+      return p.length > 1;
+    default:
+      return false;
+  }
 }
 
 /** Keep a "this page's video" entry at the top of the tab's media list. */
