@@ -29,13 +29,17 @@ pub enum Kind {
     Http,
     Hls,
     Dash,
+    /// A video-site page (YouTube, Vimeo, …) resolved through yt-dlp.
+    Site,
 }
 
 impl Kind {
     pub fn detect(url: &str, content_type: Option<&str>) -> Kind {
         let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
         let ct = content_type.unwrap_or_default().to_ascii_lowercase();
-        if path.ends_with(".m3u8") || ct.contains("mpegurl") {
+        if crate::site::is_site_url(url) {
+            Kind::Site
+        } else if path.ends_with(".m3u8") || ct.contains("mpegurl") {
             Kind::Hls
         } else if path.ends_with(".mpd") || ct.contains("dash+xml") {
             Kind::Dash

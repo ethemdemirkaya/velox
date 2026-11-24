@@ -40,6 +40,8 @@ pub struct Settings {
     pub autostart: bool,
     pub close_to_tray: bool,
     pub notifications: bool,
+    /// Show the small per-download progress window (IDM style).
+    pub progress_window: bool,
     pub capture_enabled: bool,
     pub capture_extensions: Vec<String>,
     /// Minimum size in KiB the extension captures automatically.
@@ -71,6 +73,7 @@ impl Default for Settings {
             autostart: false,
             close_to_tray: true,
             notifications: true,
+            progress_window: true,
             capture_enabled: true,
             capture_extensions: "zip rar 7z gz xz tar iso exe msi dmg apk deb rpm mp4 mkv avi mov webm mp3 flac wav m4a pdf epub bin img"
                 .split(' ')

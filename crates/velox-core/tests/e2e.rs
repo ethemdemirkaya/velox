@@ -168,7 +168,7 @@ async fn more_connections_are_faster() {
         let dir = tempfile::tempdir().unwrap();
         let e = engine(dir.path(), conns);
         let t = Instant::now();
-        let d = e.add(AddRequest { url: srv.url.clone(), ..Default::default() }).await.unwrap();
+        let d = e.add(AddRequest { url: srv.url.clone(), connections: Some(conns), ..Default::default() }).await.unwrap();
         let done = wait_for(&e, &d.record.id, Status::Completed, 60).await;
         assert!(std::fs::read(done.record.path()).unwrap() == *srv.data);
         t.elapsed()

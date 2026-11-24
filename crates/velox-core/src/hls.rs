@@ -252,7 +252,7 @@ pub(crate) async fn run(ctx: Arc<HlsCtx>, part: PathBuf, resume_from: u64, resum
 }
 
 pub fn ffmpeg() -> Option<PathBuf> {
-    which::which("ffmpeg").ok()
+    crate::tools::ffmpeg()
 }
 
 /// Remux a finished `.ts` into `.mp4` without re-encoding.

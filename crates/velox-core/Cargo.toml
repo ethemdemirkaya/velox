@@ -27,6 +27,7 @@ cbc = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 dirs = "5"
 which = "6"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Ioctl"] }

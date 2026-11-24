@@ -17,7 +17,9 @@ use crate::hls::{self, HlsCtx};
 use crate::http::{self, DlError, Live};
 use crate::ratelimit::RateLimiter;
 use crate::settings::{AfterQueue, Settings, MAX_CONNECTIONS};
+use crate::site;
 use crate::store::Store;
+use crate::tools::{self, ToolsStatus};
 use crate::types::*;
 use crate::util;
 
@@ -38,6 +40,7 @@ pub enum EngineEvent {
     Removed(DownloadId),
     Progress(Vec<Progress>),
     Settings(Settings),
+    Tools(ToolsStatus),
     QueueFinished,
 }
 
@@ -146,6 +149,19 @@ fn header_map(referrer: &Option<String>, cookies: &Option<String>, ua: &Option<S
     h
 }
 
+/// Pick the number of connections from the file size. Users never need to
+/// tune this; servers that dislike many connections are handled adaptively.
+fn auto_connections(total: Option<u64>) -> u16 {
+    const MB: u64 = 1024 * 1024;
+    match total {
+        None => 8,
+        Some(t) if t < 4 * MB => 4,
+        Some(t) if t < 64 * MB => 8,
+        Some(t) if t < 1024 * MB => 16,
+        Some(_) => MAX_CONNECTIONS,
+    }
+}
+
 fn stream_name(url: &str, given: Option<&str>) -> String {
     let base = given
         .map(str::to_string)
@@ -165,11 +181,13 @@ impl Engine {
     /// Open (or create) the engine database in `data_dir`. Must be called
     /// from within a Tokio runtime.
     pub fn open(data_dir: &Path) -> Result<Engine, String> {
+        tools::set_dir(data_dir.join("tools"));
         let store = Store::open(&data_dir.join("velox.db")).map_err(|e| e.to_string())?;
         Ok(Self::with_store(store))
     }
 
     pub fn in_memory() -> Engine {
+        tools::set_dir(std::env::temp_dir().join("velox-tools"));
         Self::with_store(Store::memory())
     }
 
@@ -253,6 +271,26 @@ impl Engine {
             return Err(format!("unsupported scheme: {}", parsed.scheme()));
         }
         let kind = req.kind.unwrap_or_else(|| Kind::detect(&url, None));
+        if kind == Kind::Site {
+            if tools::ytdlp().is_none() {
+                let client = self.0.client.read().clone();
+                tools::install_ytdlp(&client).await.map_err(|e| format!("could not install yt-dlp: {e}"))?;
+                self.emit(EngineEvent::Tools(tools::status()));
+            }
+            let r = site::resolve(&url).await?;
+            let stem: String = util::sanitize(&r.title).chars().take(150).collect();
+            return Ok(Resolved {
+                file_name: format!("{stem}.{}", r.ext),
+                final_url: url.clone(),
+                url,
+                kind,
+                total: r.approx_size,
+                resumable: true,
+                content_type: None,
+                etag: None,
+                last_modified: None,
+            });
+        }
         if kind != Kind::Http {
             return Ok(Resolved {
                 file_name: stream_name(&url, req.file_name.as_deref()),
@@ -318,7 +356,6 @@ impl Engine {
         let dir = req.dir.clone().filter(|d| !d.trim().is_empty()).map(PathBuf::from).unwrap_or_else(|| self.default_dir(&r.file_name));
         let path = util::unique_path(&dir, &r.file_name);
         let file_name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(r.file_name);
-        let settings = self.settings();
         let record = Record {
             id: uuid::Uuid::new_v4().to_string(),
             url: r.url,
@@ -340,7 +377,7 @@ impl Engine {
             cookies: req.cookies,
             user_agent: req.user_agent,
             headers: req.headers,
-            connections: req.connections.unwrap_or(settings.connections).clamp(1, MAX_CONNECTIONS),
+            connections: req.connections.unwrap_or_else(|| auto_connections(r.total)).clamp(1, MAX_CONNECTIONS),
             speed_limit: req.speed_limit.unwrap_or(0),
             error: None,
             created_at: util::now_ms(),
@@ -447,6 +484,14 @@ impl Engine {
                 }
                 finalize(&part, &path).map(Some)
             }
+            Kind::Site => {
+                let res = self.run_site(&rec, client, live, cancel, &path).await;
+                if res.is_err() {
+                    // Media URLs expire; resolve again on the next attempt.
+                    site::forget(&rec.url);
+                }
+                res
+            }
             Kind::Dash => {
                 let ctx = Arc::new(HlsCtx {
                     client,
@@ -461,6 +506,68 @@ impl Engine {
                 finalize(&part, &path).map(Some)
             }
         }
+    }
+
+    async fn run_site(
+        &self,
+        rec: &Record,
+        client: Client,
+        live: Arc<Live>,
+        cancel: CancellationToken,
+        path: &Path,
+    ) -> Result<Option<String>, DlError> {
+        let r = site::resolve(&rec.url).await.map_err(DlError::Other)?;
+        let path = path.with_extension(&r.ext);
+        let ctx = site::SiteCtx { client, live, global: self.0.global.clone(), cancel, conns: rec.connections };
+        let parts = site::download(&ctx, &r, &path, rec.hls_done as usize, &rec.segments).await?;
+        if parts.len() == 1 {
+            return finalize(&parts[0], &path).map(Some);
+        }
+        self.set_status(&rec.id, Status::Merging);
+        let tmp = path.with_extension(format!("merging.{}", r.ext));
+        site::merge(&parts, &tmp).await?;
+        for p in &parts {
+            let _ = std::fs::remove_file(p);
+        }
+        finalize(&tmp, &path).map(Some)
+    }
+
+    /// Install yt-dlp and (on Windows) ffmpeg into the private tools folder.
+    /// ffmpeg is fetched through the engine itself, so it shows up – and is
+    /// accelerated – like any other download.
+    pub async fn install_tools(&self) -> Result<ToolsStatus, String> {
+        let client = self.0.client.read().clone();
+        if tools::ytdlp().is_none() {
+            tools::install_ytdlp(&client).await?;
+            self.emit(EngineEvent::Tools(tools::status()));
+        }
+        if tools::ffmpeg().is_none() && cfg!(windows) {
+            let dir = tools::dir().ok_or("no tools dir")?.to_string_lossy().into_owned();
+            let d = self
+                .add(AddRequest { url: tools::FFMPEG_ZIP.into(), dir: Some(dir), file_name: Some("ffmpeg-tools.zip".into()), ..Default::default() })
+                .await?;
+            let id = d.record.id.clone();
+            if self.get(&id).map(|d| d.record.status) == Some(Status::Queued) {
+                self.resume(&id);
+            }
+            let done = loop {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                match self.get(&id) {
+                    Some(d) if d.record.status == Status::Completed => break d,
+                    Some(d) if d.record.status == Status::Failed => return Err(d.record.error.unwrap_or_default()),
+                    Some(d) if d.record.status == Status::Paused => return Err("cancelled".into()),
+                    None => return Err("cancelled".into()),
+                    _ => {}
+                }
+            };
+            let zip = done.record.path();
+            let res = tokio::task::spawn_blocking(move || tools::extract_ffmpeg(&zip)).await.map_err(|e| e.to_string())?;
+            self.remove(&id, true);
+            res?;
+        }
+        let st = tools::status();
+        self.emit(EngineEvent::Tools(st.clone()));
+        Ok(st)
     }
 
     fn set_status(&self, id: &str, status: Status) {
