@@ -40,6 +40,17 @@ pub(crate) struct Format {
     pub url: String,
     pub headers: HeaderMap,
     pub size: Option<u64>,
+    /// yt-dlp protocol: `https`, `m3u8_native`, `http_dash_segments`, ...
+    pub protocol: String,
+}
+
+impl Format {
+    pub fn is_http(&self) -> bool {
+        matches!(self.protocol.as_str(), "http" | "https" | "")
+    }
+    pub fn is_hls(&self) -> bool {
+        self.protocol.starts_with("m3u8")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -50,15 +61,36 @@ pub(crate) struct Resolved {
     pub approx_size: Option<u64>,
 }
 
+impl Resolved {
+    /// Some protocol we cannot fetch ourselves (DASH segments, RTMP, ...):
+    /// hand the whole job to yt-dlp.
+    pub fn needs_ytdlp(&self) -> bool {
+        self.formats.iter().any(|f| !f.is_http() && !f.is_hls())
+    }
+    pub fn needs_remux(&self) -> bool {
+        self.formats.len() > 1 || self.formats.iter().any(Format::is_hls)
+    }
+}
+
 static CACHE: Mutex<Option<HashMap<String, (Instant, Resolved)>>> = Mutex::new(None);
 
-fn selector(have_ffmpeg: bool) -> &'static str {
+pub(crate) fn selector(have_ffmpeg: bool) -> &'static str {
+    // Prefer plain HTTPS files (segmented download = fastest), H.264/AAC in
+    // MP4 (plays everywhere); fall back to whatever the site offers (HLS...).
     if have_ffmpeg {
-        // Prefer H.264/AAC in MP4 (plays everywhere), else best of anything.
-        "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"
+        "bv*[ext=mp4][protocol~='^https?$']+ba[ext=m4a][protocol~='^https?$']/b[vcodec!=none][acodec!=none][protocol~='^https?$']/bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b"
     } else {
-        "b[vcodec!=none][acodec!=none]/b"
+        "b[vcodec!=none][acodec!=none][protocol~='^https?$']/b[vcodec!=none][acodec!=none]/b"
     }
+}
+
+fn format_of(f: &Value) -> Option<Format> {
+    Some(Format {
+        url: f.get("url")?.as_str()?.to_string(),
+        headers: headers_of(f),
+        size: size_of(f),
+        protocol: f.get("protocol").and_then(Value::as_str).unwrap_or("https").to_string(),
+    })
 }
 
 fn headers_of(v: &Value) -> HeaderMap {
@@ -105,13 +137,9 @@ pub(crate) async fn resolve(url: &str) -> Result<Resolved, String> {
     let formats: Vec<Format> = match v.get("requested_formats").and_then(Value::as_array) {
         Some(list) if !list.is_empty() => list
             .iter()
-            .filter_map(|f| Some(Format { url: f.get("url")?.as_str()?.to_string(), headers: headers_of(f), size: size_of(f) }))
+            .filter_map(format_of)
             .collect(),
-        _ => vec![Format {
-            url: v.get("url").and_then(Value::as_str).ok_or("no downloadable format")?.to_string(),
-            headers: headers_of(&v),
-            size: size_of(&v),
-        }],
+        _ => vec![format_of(&v).ok_or("no downloadable format")?],
     };
     if formats.is_empty() {
         return Err("no downloadable format".into());
@@ -158,6 +186,11 @@ pub(crate) async fn download(ctx: &SiteCtx, r: &Resolved, base: &std::path::Path
     let mut sizes = Vec::with_capacity(r.formats.len());
     let mut ranged = Vec::with_capacity(r.formats.len());
     for f in &r.formats {
+        if f.is_hls() {
+            sizes.push(None);
+            ranged.push(false);
+            continue;
+        }
         let p = http::probe(&ctx.client, &f.url, &f.headers).await?;
         sizes.push(p.size.or(f.size));
         ranged.push(p.resumable);
@@ -207,7 +240,20 @@ pub(crate) async fn download(ctx: &SiteCtx, r: &Resolved, base: &std::path::Path
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         });
-        let res = http::run(hctx, part.clone()).await;
+        let res = if f.is_hls() {
+            let hctx = Arc::new(crate::hls::HlsCtx {
+                client: ctx.client.clone(),
+                url: f.url.clone(),
+                headers: f.headers.clone(),
+                live: sub.clone(),
+                global: ctx.global.clone(),
+                cancel: ctx.cancel.clone(),
+                conns: ctx.conns.min(16),
+            });
+            crate::hls::run(hctx, part.clone(), 0, 0).await.map(|_| 0)
+        } else {
+            http::run(hctx, part.clone()).await
+        };
         mirror.abort();
         mirror_main(&ctx.live, &sub, offset);
         res?;
@@ -220,6 +266,12 @@ pub(crate) async fn download(ctx: &SiteCtx, r: &Resolved, base: &std::path::Path
 
 fn mirror_main(main: &Live, sub: &Live, off: u64) {
     main.downloaded.store(off + sub.downloaded.load(Ordering::Relaxed), Ordering::Relaxed);
+    if let Some(t) = sub.total() {
+        // Streams of unknown size (HLS): grow the combined estimate.
+        if main.total().is_none_or(|c| c < off + t) {
+            main.total.store(off + t, Ordering::Relaxed);
+        }
+    }
     main.active.store(sub.active.load(Ordering::Relaxed), Ordering::Relaxed);
     let mut segs: Vec<http::SegState> = main.segments.lock().iter().filter(|s| s.end <= off).copied().collect();
     if off > 0 && segs.is_empty() {
@@ -256,6 +308,63 @@ pub(crate) async fn merge(parts: &[std::path::PathBuf], out: &std::path::Path) -
         return Err(DlError::Other(format!("ffmpeg merge failed: {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or(""))));
     }
     Ok(())
+}
+
+/// Last resort for protocols Velox can't fetch itself: let yt-dlp download
+/// (and merge) the whole thing while we relay its progress.
+pub(crate) async fn ytdlp_download(ctx: &SiteCtx, page: &str, base: &std::path::Path) -> Result<std::path::PathBuf, DlError> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    let ytdlp = tools::ytdlp().ok_or_else(|| DlError::Other("yt-dlp is not installed".into()))?;
+    let mut cmd = tools::command(&ytdlp);
+    let template = format!("{}.%(ext)s", base.with_extension("").display());
+    cmd.args(["--no-playlist", "--no-warnings", "--newline", "--progress", "-N", "8", "--merge-output-format", "mp4"]);
+    cmd.args(["-f", selector(tools::ffmpeg().is_some())]);
+    if let Some(ff) = tools::ffmpeg() {
+        cmd.arg("--ffmpeg-location").arg(ff);
+    }
+    cmd.args(["--progress-template", "download:VELOX %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s"]);
+    cmd.args(["--print", "after_move:VELOXFILE %(filepath)s", "-o"]).arg(&template).arg(page);
+    cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| DlError::Other(format!("yt-dlp: {e}")))?;
+    let mut stderr = child.stderr.take().unwrap();
+    let err_task = tokio::spawn(async move {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s).await;
+        s
+    });
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let (mut done_prev, mut last, mut file) = (0u64, 0u64, None);
+    loop {
+        let line = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                let _ = child.kill().await;
+                return Err(DlError::Cancelled);
+            }
+            l = lines.next_line() => l,
+        };
+        let Ok(Some(line)) = line else { break };
+        if let Some(p) = line.strip_prefix("VELOXFILE ") {
+            file = Some(std::path::PathBuf::from(p.trim()));
+        } else if let Some(rest) = line.strip_prefix("VELOX ") {
+            let n: Vec<Option<u64>> = rest.split_whitespace().map(|x| x.parse::<f64>().ok().map(|f| f as u64)).collect();
+            let cur = n.first().copied().flatten().unwrap_or(0);
+            if cur < last {
+                done_prev += last; // the next stream started
+            }
+            last = cur;
+            ctx.live.downloaded.store(done_prev + cur, Ordering::Relaxed);
+            if let Some(t) = n.get(1).copied().flatten().or(n.get(2).copied().flatten()) {
+                ctx.live.total.store(done_prev + t, Ordering::Relaxed);
+            }
+        }
+    }
+    let status = child.wait().await?;
+    if !status.success() {
+        let err = err_task.await.unwrap_or_default();
+        let msg = err.lines().rev().find(|l| l.contains("ERROR")).unwrap_or("yt-dlp failed").trim_start_matches("ERROR: ");
+        return Err(DlError::Other(msg.chars().take(300).collect()));
+    }
+    file.ok_or_else(|| DlError::Other("yt-dlp did not report the output file".into()))
 }
 
 #[cfg(test)]

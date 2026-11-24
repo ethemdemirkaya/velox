@@ -519,8 +519,12 @@ impl Engine {
         let r = site::resolve(&rec.url).await.map_err(DlError::Other)?;
         let path = path.with_extension(&r.ext);
         let ctx = site::SiteCtx { client, live, global: self.0.global.clone(), cancel, conns: rec.connections };
+        if r.needs_ytdlp() {
+            let out = site::ytdlp_download(&ctx, &rec.url, &path).await?;
+            return Ok(out.file_name().map(|s| s.to_string_lossy().into_owned()));
+        }
         let parts = site::download(&ctx, &r, &path, rec.hls_done as usize, &rec.segments).await?;
-        if parts.len() == 1 {
+        if !r.needs_remux() {
             return finalize(&parts[0], &path).map(Some);
         }
         self.set_status(&rec.id, Status::Merging);
