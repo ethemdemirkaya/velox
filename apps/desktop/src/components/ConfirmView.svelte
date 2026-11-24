@@ -23,7 +23,8 @@
       const s = await api.getSettings();
       i18n.set(s.language);
       req = await api.getPending(token);
-      fileName = req.fileName ?? "";
+      // Show a name right away; the probe refines it.
+      fileName = req.fileName ?? decodeURIComponent(new URL(req.url).pathname.split("/").filter(Boolean).pop() ?? "");
       probe = await api.probe(req);
       if (!req.fileName) fileName = probe.fileName;
       dir = probe.dir;
@@ -74,8 +75,8 @@
 
   <div class="body">
     <div class="file">
-      {#if probe}
-        <FileIcon name={fileName} category={probe.category} size={48} />
+      {#if probe || fileName}
+        <FileIcon name={fileName} category={probe?.category ?? "other"} size={48} />
       {:else}
         <div class="sk"></div>
       {/if}
@@ -87,7 +88,15 @@
           {:else if probe}
             <span class="num strong">{probe.size != null ? bytes(probe.size) : t("add.unknownSize")}</span>
             <span>·</span>
-            <span>{probe.kind !== "http" ? `${t("add.stream")} ${probe.kind.toUpperCase()}` : probe.resumable ? t("add.resumable") : t("add.notResumable")}</span>
+            <span
+              >{probe.kind === "site"
+                ? t("add.video")
+                : probe.kind !== "http"
+                  ? `${t("add.stream")} ${probe.kind.toUpperCase()}`
+                  : probe.resumable
+                    ? t("add.resumable")
+                    : t("add.notResumable")}</span
+            >
             <span>·</span>
             <span class="host">{host(probe.finalUrl)}</span>
           {:else}

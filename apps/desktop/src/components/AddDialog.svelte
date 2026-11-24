@@ -14,7 +14,6 @@
   let error = $state("");
   let fileName = $state("");
   let dir = $state("");
-  let connections = $state(store.settings?.connections ?? 16);
   let busy = $state(false);
   let input: HTMLTextAreaElement;
 
@@ -85,13 +84,12 @@
           url: single,
           fileName: fileName || null,
           dir: dir || null,
-          connections,
           startPaused: paused,
           kind: probe?.kind ?? null,
         });
         toasts.push({ kind: "info", title: t("toast.added", { name: fileName || single }), timeout: 2500 });
       } else {
-        const res = await Promise.allSettled(urls.map((url) => api.add({ url, connections, startPaused: paused, dir: dir || null })));
+        const res = await Promise.allSettled(urls.map((url) => api.add({ url, startPaused: paused, dir: dir || null })));
         const failed = res.filter((r) => r.status === "rejected").length;
         if (failed) toasts.push({ kind: "error", title: t("toast.error"), body: `${failed} / ${urls.length}` });
       }
@@ -147,7 +145,9 @@
               <div class="meta">
                 <span class="num">{probe.size != null ? bytes(probe.size) : t("add.unknownSize")}</span>
                 <span class="dotsep">·</span>
-                {#if probe.kind !== "http"}
+                {#if probe.kind === "site"}
+                  <span>{t("add.video")}</span>
+                {:else if probe.kind !== "http"}
                   <span>{t("add.stream")} {probe.kind.toUpperCase()}</span>
                 {:else}
                   <span class:warn={!probe.resumable}>{probe.resumable ? t("add.resumable") : t("add.notResumable")}</span>
@@ -171,10 +171,7 @@
             <button class="btn icon" onclick={pick} title={t("action.change")}><Icon name="folder" size={14} /></button>
           </div>
         </div>
-        <div>
-          <span class="label">{t("add.connections")} <b class="num">{connections}</b></span>
-          <input class="range" type="range" min="1" max="32" bind:value={connections} />
-        </div>
+
       </div>
     </div>
 
@@ -262,7 +259,7 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: 1fr 180px;
+    grid-template-columns: 1fr;
     gap: 16px;
     margin-top: 16px;
   }
@@ -272,16 +269,6 @@
   }
   .dir .input {
     font-size: 11.5px;
-  }
-  .label b {
-    color: var(--text);
-    font-weight: 600;
-    margin-left: 4px;
-  }
-  .range {
-    width: 100%;
-    margin-top: 10px;
-    accent-color: var(--text);
   }
   footer {
     display: flex;

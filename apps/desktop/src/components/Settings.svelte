@@ -3,7 +3,8 @@
   import Icon from "./Icon.svelte";
   import Logo from "./Logo.svelte";
   import Toggle from "./Toggle.svelte";
-  import { api, type AppInfo, type Settings } from "../lib/api";
+  import { api, onEngine, type AppInfo, type Settings, type ToolsStatus } from "../lib/api";
+  import { toasts } from "../lib/toasts.svelte";
   import { store } from "../lib/store.svelte";
   import { t, type I18nKey } from "../lib/i18n.svelte";
   import { bytes, parseRate } from "../lib/format";
@@ -20,6 +21,19 @@
   let info = $state<AppInfo | null>(null);
   let update = $state<"idle" | "checking" | "none" | string>("idle");
   let installing = $state(false);
+  let tools = $state<ToolsStatus | null>(null);
+  let toolsBusy = $state(false);
+
+  async function installTools() {
+    toolsBusy = true;
+    try {
+      tools = await api.installTools();
+    } catch (e) {
+      toasts.push({ kind: "error", title: t("toast.error"), body: String(e) });
+    } finally {
+      toolsBusy = false;
+    }
+  }
 
   const s = $derived(store.settings!);
   let limitText = $state("");
@@ -30,8 +44,15 @@
     extText = s?.captureExtensions.join(" ") ?? "";
   });
 
-  onMount(async () => {
-    info = await api.appInfo();
+  onMount(() => {
+    api.appInfo().then((i) => (info = i));
+    api.toolsStatus().then((s) => (tools = s));
+    const un = onEngine((e) => {
+      if (e.type === "tools") tools = e.data;
+    });
+    return () => {
+      un.then((f) => f());
+    };
   });
 
   const save = (patch: Partial<Settings>) => store.saveSettings(patch);
@@ -88,6 +109,13 @@
             </div>
             <div class="row">
               <div class="l">
+                <div class="t">{t("settings.progressWindow")}</div>
+                <div class="h">{t("settings.progressWindowHint")}</div>
+              </div>
+              <Toggle checked={s.progressWindow} onchange={(v) => save({ progressWindow: v })} />
+            </div>
+            <div class="row">
+              <div class="l">
                 <div class="t">{t("settings.notifications")}</div>
                 <div class="h">{t("settings.notificationsHint")}</div>
               </div>
@@ -114,16 +142,6 @@
                 <div class="h">{t("settings.categoryFoldersHint")}</div>
               </div>
               <Toggle checked={s.useCategoryFolders} onchange={(v) => save({ useCategoryFolders: v })} />
-            </div>
-            <div class="row">
-              <div class="l">
-                <div class="t">{t("settings.connections")}</div>
-                <div class="h">{t("settings.connectionsHint")}</div>
-              </div>
-              <div class="slider">
-                <input type="range" min="1" max="32" value={s.connections} onchange={(e) => save({ connections: +e.currentTarget.value })} />
-                <span class="num v">{s.connections}</span>
-              </div>
             </div>
             <div class="row">
               <div class="l"><div class="t">{t("settings.concurrent")}</div></div>
@@ -172,6 +190,23 @@
               </div>
               <p class="muted">{t("settings.extensionHint")}</p>
               {#if info}<p class="mono faint">ID: {info.extensionId}</p>{/if}
+            </div>
+            <div class="card">
+              <div class="card-h">
+                <Icon name="film" size={16} />
+                <b>{t("settings.video")}</b>
+                {#if tools}
+                  <span class="pill" class:ok={tools.ytdlp && tools.ffmpeg}><i></i>yt-dlp {tools.ytdlp ? "✓" : "—"} · ffmpeg {tools.ffmpeg ? "✓" : "—"}</span>
+                {/if}
+              </div>
+              <p class="muted">{t("settings.videoHint")}</p>
+              {#if tools && (!tools.ytdlp || (!tools.ffmpeg && tools.ffmpegInstallable))}
+                <button class="btn primary tools-btn" onclick={installTools} disabled={toolsBusy}>
+                  <Icon name="down" size={14} stroke={1.8} />{toolsBusy ? t("settings.installing") : t("settings.installTools")}
+                </button>
+              {:else if tools && !tools.ffmpeg}
+                <p class="faint">{t("settings.ffmpegManual")}</p>
+              {/if}
             </div>
             <div class="row">
               <div class="l">
@@ -392,20 +427,6 @@
     color: var(--text);
     border-color: var(--border-3);
   }
-  .slider {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .slider input {
-    width: 180px;
-    accent-color: var(--text);
-  }
-  .slider .v {
-    width: 22px;
-    text-align: right;
-    font-weight: 600;
-  }
   .stepper {
     display: flex;
     align-items: center;
@@ -436,6 +457,9 @@
   }
   .card-h .pill {
     margin-left: auto;
+  }
+  .tools-btn {
+    margin-top: 12px;
   }
   .card p {
     margin: 10px 0 0;

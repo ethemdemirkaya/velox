@@ -43,7 +43,7 @@
       <div class="status">
         {#if active}<span class="dot-live"></span>{/if}
         <span class:err={d.status === "failed"}>{t(("status." + d.status) as any)}</span>
-        {#if d.kind !== "http"}<span class="tag">{d.kind.toUpperCase()}</span>{/if}
+        {#if d.kind !== "http"}<span class="tag">{d.kind === "site" ? t("kind.site") : d.kind.toUpperCase()}</span>{/if}
       </div>
 
       <div class="big">

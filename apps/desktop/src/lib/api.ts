@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Status = "queued" | "connecting" | "downloading" | "merging" | "paused" | "completed" | "failed";
-export type Kind = "http" | "hls" | "dash";
+export type Kind = "http" | "hls" | "dash" | "site";
 export type Category = "video" | "music" | "documents" | "programs" | "compressed" | "images" | "other";
 
 export interface Segment {
@@ -86,6 +86,7 @@ export interface Settings {
   autostart: boolean;
   closeToTray: boolean;
   notifications: boolean;
+  progressWindow: boolean;
   captureEnabled: boolean;
   captureExtensions: string[];
   captureMinSizeKb: number;
@@ -93,6 +94,12 @@ export interface Settings {
   proxy: string;
   schedule: { enabled: boolean; start: string; stop: string };
   afterQueue: "nothing" | "shutdown" | "sleep";
+}
+
+export interface ToolsStatus {
+  ytdlp: boolean;
+  ffmpeg: boolean;
+  ffmpegInstallable: boolean;
 }
 
 export interface AppInfo {
@@ -109,6 +116,7 @@ export type EngineEvent =
   | { type: "removed"; data: string }
   | { type: "progress"; data: Progress[] }
   | { type: "settings"; data: Settings }
+  | { type: "tools"; data: ToolsStatus }
   | { type: "queue_finished" };
 
 export const api = {
@@ -134,6 +142,9 @@ export const api = {
   checkUpdate: () => invoke<string | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
   quit: () => invoke<void>("quit"),
+  toolsStatus: () => invoke<ToolsStatus>("tools_status"),
+  installTools: () => invoke<ToolsStatus>("install_tools"),
+  showProgress: (id: string) => invoke<void>("show_progress", { id }),
   readClipboard: () => invoke<string>("read_clipboard"),
   writeClipboard: (text: string) => invoke<void>("write_clipboard", { text }),
 };

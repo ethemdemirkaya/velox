@@ -11,13 +11,15 @@
   import Toasts from "./components/Toasts.svelte";
   import RemoveDialog from "./components/RemoveDialog.svelte";
   import ConfirmView from "./components/ConfirmView.svelte";
+  import ProgressView from "./components/ProgressView.svelte";
   import { api } from "./lib/api";
 
   const confirmToken = location.hash.match(/^#\/confirm\/(\w+)/)?.[1] ?? null;
+  const progressId = location.hash.match(/^#\/progress\/([\w-]+)/)?.[1] ?? null;
   let ready = $state(false);
 
   onMount(async () => {
-    if (confirmToken) return;
+    if (confirmToken || progressId) return;
     await store.init();
     ready = true;
   });
@@ -28,7 +30,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (confirmToken) return;
+    if (confirmToken || progressId) return;
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key.toLowerCase();
     if (mod && k === "k") {
@@ -101,6 +103,8 @@
 
 {#if confirmToken}
   <ConfirmView token={confirmToken} />
+{:else if progressId}
+  <ProgressView id={progressId} />
 {:else}
   <div class="shell">
     <TitleBar />
