@@ -140,12 +140,12 @@
       </style>
       <div class="wrap">
         <div class="p">
-          <button class="go" title="Velox">
+          <button class="go">
             <svg width="13" height="13" viewBox="0 0 24 24"><path d="M3 3h4.1L12 12.4 16.9 3H21L12 18.6z" fill="#f2f2f2"/><rect x="10.6" y="19.6" width="2.8" height="2.8" fill="#ff3b30"/></svg>
             <span class="t"></span>
           </button>
-          <button class="q" title="?">?</button>
-          <button class="x" title="✕">×</button>
+          <button class="q">?</button>
+          <button class="x">×</button>
         </div>
         <div class="menu"></div>
         <div class="info"></div>
@@ -156,14 +156,6 @@
     info = root.querySelector(".info");
     label.textContent = L.dl;
     buildInfo();
-    pill.addEventListener("click", (e) => {
-      if (dragMoved) {
-        e.preventDefault();
-        e.stopPropagation();
-        return;
-      }
-      onClick(e);
-    });
     const q = root.querySelector(".q");
     q.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -223,6 +215,7 @@
     let sx = 0, sy = 0, ox = 0, oy = 0, down = false;
     handle.addEventListener("pointerdown", (e) => {
       if (e.button !== 0 || e.target.closest(".x, .q")) return;
+      e.preventDefault();
       down = true;
       dragMoved = false;
       sx = e.clientX;
@@ -241,15 +234,21 @@
       offset = { dx: ox + dx, dy: oy + dy };
       place();
     });
-    const end = () => {
+    // Pointer capture retargets the click to the handle, so a press that did
+    // not move is turned into the download click here.
+    const end = (e, cancelled) => {
       if (!down) return;
       down = false;
       handle.classList.remove("dragging");
-      if (dragMoved) chrome.storage?.local.set({ [KEY_OFF]: offset });
-      setTimeout(() => (dragMoved = false), 0);
+      if (dragMoved) {
+        chrome.storage?.local.set({ [KEY_OFF]: offset });
+        setTimeout(() => (dragMoved = false), 0);
+      } else if (!cancelled) {
+        onClick(e);
+      }
     };
-    handle.addEventListener("pointerup", end);
-    handle.addEventListener("pointercancel", end);
+    handle.addEventListener("pointerup", (e) => end(e, false));
+    handle.addEventListener("pointercancel", (e) => end(e, true));
   }
 
   function mount() {
