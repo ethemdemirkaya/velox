@@ -272,10 +272,10 @@ impl Engine {
         }
         let kind = req.kind.unwrap_or_else(|| Kind::detect(&url, None));
         if kind == Kind::Site {
-            if tools::ytdlp().is_none() {
-                let client = self.0.client.read().clone();
-                tools::install_ytdlp(&client).await.map_err(|e| format!("could not install yt-dlp: {e}"))?;
-                self.emit(EngineEvent::Tools(tools::status()));
+            // First video-site download: fetch the helpers automatically so
+            // users get HD (video + audio) without touching any setting.
+            if tools::ytdlp().is_none() || (tools::ffmpeg().is_none() && cfg!(windows)) {
+                Box::pin(self.install_tools()).await.map_err(|e| format!("could not install video tools: {e}"))?;
             }
             let r = site::resolve(&url).await?;
             let stem: String = util::sanitize(&r.title).chars().take(150).collect();
