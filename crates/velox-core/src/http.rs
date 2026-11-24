@@ -93,6 +93,7 @@ pub(crate) struct Live {
     pub stop_reason: AtomicU8,
     pub hls_done: AtomicU64,
     pub hls_count: AtomicU64,
+    pub hls_bytes: AtomicU64,
 }
 
 impl Live {
@@ -110,6 +111,7 @@ impl Live {
             stop_reason: AtomicU8::new(0),
             hls_done: AtomicU64::new(0),
             hls_count: AtomicU64::new(0),
+            hls_bytes: AtomicU64::new(0),
         }
     }
 

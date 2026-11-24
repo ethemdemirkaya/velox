@@ -333,6 +333,7 @@ impl Engine {
             segments: vec![],
             hls_done: 0,
             hls_count: 0,
+            hls_bytes: 0,
             etag: r.etag,
             last_modified: r.last_modified,
             referrer: req.referrer,
@@ -380,6 +381,7 @@ impl Engine {
             let r = &job.record;
             let live = Arc::new(Live::new(r.downloaded, r.total, &r.segments, r.speed_limit));
             live.hls_done.store(r.hls_done, Ordering::Relaxed);
+            live.hls_bytes.store(r.hls_bytes, Ordering::Relaxed);
             let cancel = CancellationToken::new();
             job.live = live.clone();
             job.cancel = Some(cancel.clone());
@@ -432,7 +434,7 @@ impl Engine {
                     cancel,
                     conns: rec.connections.min(16),
                 });
-                let done = hls::run(ctx, part.clone(), rec.hls_done, rec.downloaded).await?;
+                let done = hls::run(ctx, part.clone(), rec.hls_done, rec.hls_bytes).await?;
                 if done.ext == "ts" {
                     self.set_status(&rec.id, Status::Merging);
                     let tmp = path.with_extension("remux.mp4");
@@ -489,6 +491,7 @@ impl Engine {
             r.total = live.total().or(r.total);
             r.hls_done = live.hls_done.load(Ordering::Relaxed);
             r.hls_count = live.hls_count.load(Ordering::Relaxed);
+            r.hls_bytes = live.hls_bytes.load(Ordering::Relaxed);
             match res {
                 Ok(name) => {
                     if let Some(p) = name {
@@ -678,6 +681,7 @@ impl Engine {
                     job.record.total = job.live.total().or(job.record.total);
                     job.record.hls_done = job.live.hls_done.load(Ordering::Relaxed);
                     job.record.hls_count = job.live.hls_count.load(Ordering::Relaxed);
+                    job.record.hls_bytes = job.live.hls_bytes.load(Ordering::Relaxed);
                     if job.record.status == Status::Connecting && d > 0 {
                         job.record.status = Status::Downloading;
                         updated.push(job.info());

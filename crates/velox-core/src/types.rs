@@ -106,6 +106,9 @@ pub struct Record {
     pub hls_done: u64,
     #[serde(default)]
     pub hls_count: u64,
+    /// HLS: bytes actually written to the part file (resume point).
+    #[serde(default)]
+    pub hls_bytes: u64,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub referrer: Option<String>,

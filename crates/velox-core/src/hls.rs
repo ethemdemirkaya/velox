@@ -178,6 +178,7 @@ pub(crate) async fn run(ctx: Arc<HlsCtx>, part: PathBuf, resume_from: u64, resum
     file.seek(std::io::SeekFrom::End(0))?;
     ctx.live.downloaded.store(if start > 0 { resume_bytes } else { 0 }, Ordering::Relaxed);
     ctx.live.hls_done.store(start, Ordering::Relaxed);
+    ctx.live.hls_bytes.store(if start > 0 { resume_bytes } else { 0 }, Ordering::Relaxed);
 
     if start == 0 {
         if let Some(init) = &init {
@@ -188,6 +189,10 @@ pub(crate) async fn run(ctx: Arc<HlsCtx>, part: PathBuf, resume_from: u64, resum
 
     let keys: Arc<tokio::sync::Mutex<HashMap<String, [u8; 16]>>> = Default::default();
     let total = jobs.len() as u64;
+    if start == 0 {
+        file.flush()?;
+        ctx.live.hls_bytes.store(file.get_ref().metadata()?.len(), Ordering::Relaxed);
+    }
     let mut results = stream::iter(jobs.into_iter().skip(start as usize))
         .map(|job| {
             let ctx = ctx.clone();
@@ -225,7 +230,7 @@ pub(crate) async fn run(ctx: Arc<HlsCtx>, part: PathBuf, resume_from: u64, resum
         .buffered(ctx.conns.max(1) as usize);
 
     let mut done = start;
-    let mut bytes_written = if start > 0 { resume_bytes } else { 0 };
+    let mut bytes_written = ctx.live.hls_bytes.load(Ordering::Relaxed);
     while let Some(seg) = results.try_next().await? {
         file.write_all(&seg)?;
         bytes_written += seg.len() as u64;
@@ -234,9 +239,10 @@ pub(crate) async fn run(ctx: Arc<HlsCtx>, part: PathBuf, resume_from: u64, resum
         // Estimated size so the UI can show a meaningful progress bar.
         let est = bytes_written / done.max(1) * total;
         ctx.live.total.store(est.max(bytes_written), Ordering::Relaxed);
-        if done % 16 == 0 {
-            file.flush()?;
-        }
+        // Flush every segment so the persisted resume point (`hls_done`,
+        // `hls_bytes`) always matches what is on disk.
+        file.flush()?;
+        ctx.live.hls_bytes.store(bytes_written, Ordering::Relaxed);
     }
     file.flush()?;
     drop(file);
