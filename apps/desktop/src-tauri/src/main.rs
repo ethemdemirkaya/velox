@@ -20,6 +20,47 @@ pub struct AppState {
     pub engine: Engine,
     pending: Mutex<HashMap<String, AddRequest>>,
     host_registered: bool,
+    tray_items: Mutex<Vec<(&'static str, MenuItem<tauri::Wry>)>>,
+}
+
+/// UI language for native surfaces (tray, notifications): setting or OS locale.
+fn lang(app: &AppHandle) -> &'static str {
+    match app.state::<AppState>().engine.settings().language.as_str() {
+        "tr" => "tr",
+        "en" => "en",
+        _ => match sys_locale::get_locale() {
+            Some(l) if l.to_ascii_lowercase().starts_with("tr") => "tr",
+            _ => "en",
+        },
+    }
+}
+
+fn tr(app: &AppHandle, key: &str) -> &'static str {
+    let turkish = lang(app) == "tr";
+    match (key, turkish) {
+        ("show", false) => "Show Velox",
+        ("show", true) => "Velox'u göster",
+        ("pause_all", false) => "Pause all",
+        ("pause_all", true) => "Tümünü duraklat",
+        ("resume_all", false) => "Start queue",
+        ("resume_all", true) => "Sırayı başlat",
+        ("quit", false) => "Quit",
+        ("quit", true) => "Çıkış",
+        ("done", false) => "Download complete",
+        ("done", true) => "İndirme tamamlandı",
+        ("failed", false) => "Download failed",
+        ("failed", true) => "İndirme başarısız",
+        ("added", false) => "Download added",
+        ("added", true) => "İndirme eklendi",
+        _ => "",
+    }
+}
+
+fn refresh_tray_labels(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    for (key, item) in state.tray_items.lock().iter() {
+        let _ = item.set_text(tr(app, key));
+    }
 }
 
 type R<T> = Result<T, String>;
@@ -57,7 +98,7 @@ pub async fn capture(app: &AppHandle, req: AddRequest, silent: bool) {
     } else {
         let engine = state.engine.clone();
         match engine.add(req).await {
-            Ok(d) => notify(app, "Velox", &format!("⬇ {}", d.record.file_name)),
+            Ok(d) => notify(app, tr(app, "added"), &d.record.file_name),
             Err(e) => notify(app, "Velox", &e),
         }
     }
@@ -146,7 +187,9 @@ async fn set_settings(app: AppHandle, s: State<'_, AppState>, settings: Settings
             tracing::warn!("autostart: {e}");
         }
     }
-    Ok(s.engine.set_settings(settings))
+    let saved = s.engine.set_settings(settings);
+    refresh_tray_labels(&app);
+    Ok(saved)
 }
 
 fn path_of(s: &AppState, id: &str) -> R<std::path::PathBuf> {
@@ -289,10 +332,12 @@ fn fmt_speed(b: f64) -> String {
 }
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show Velox", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, "pause_all", "Pause all", true, None::<&str>)?;
-    let resume = MenuItem::with_id(app, "resume_all", "Resume all", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", tr(app, "show"), true, None::<&str>)?;
+    let pause = MenuItem::with_id(app, "pause_all", tr(app, "pause_all"), true, None::<&str>)?;
+    let resume = MenuItem::with_id(app, "resume_all", tr(app, "resume_all"), true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", tr(app, "quit"), true, None::<&str>)?;
+    *app.state::<AppState>().tray_items.lock() =
+        vec![("show", show.clone()), ("pause_all", pause.clone()), ("resume_all", resume.clone()), ("quit", quit.clone())];
     let sep = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&show, &pause, &resume, &sep, &quit])?;
     let tray = TrayIconBuilder::with_id("main")
@@ -351,9 +396,9 @@ fn forward_events(app: AppHandle) {
                     if let EngineEvent::Updated(d) = &ev {
                         let fresh = d.record.finished_at.map(|t| velox_now() - t < 1500).unwrap_or(false);
                         if d.record.status == Status::Completed && fresh {
-                            notify(&app, "Download complete", &d.record.file_name);
+                            notify(&app, tr(&app, "done"), &d.record.file_name);
                         } else if d.record.status == Status::Failed {
-                            notify(&app, "Download failed", &d.record.file_name);
+                            notify(&app, tr(&app, "failed"), &d.record.file_name);
                         }
                     }
                     let _ = app.emit("engine", &ev);
@@ -384,7 +429,12 @@ fn main() {
             let engine = tauri::async_runtime::block_on(async { Engine::open(&data_dir) })
                 .map_err(Box::<dyn std::error::Error>::from)?;
             let host_registered = native_host::register();
-            app.manage(AppState { engine, pending: Mutex::new(HashMap::new()), host_registered });
+            app.manage(AppState {
+                engine,
+                pending: Mutex::new(HashMap::new()),
+                host_registered,
+                tray_items: Mutex::new(Vec::new()),
+            });
 
             let handle = app.handle().clone();
             forward_events(handle.clone());

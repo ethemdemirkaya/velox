@@ -28,6 +28,7 @@ arboard = { version = "3", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 dirs = "5"
 url = "2"
+sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
