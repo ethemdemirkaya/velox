@@ -100,7 +100,7 @@
 
   async function download(m) {
     const title = document.title.replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 120);
-    const fileName = m.kind === "http" ? null : title ? `${title}.mp4` : null;
+    const fileName = (m.kind === "hls" || m.kind === "dash") && title ? `${title}.mp4` : null;
     const r = await chrome.runtime.sendMessage({ type: "download", url: m.url, kind: m.kind, fileName, size: m.size, referrer: location.href });
     root.querySelector(".t").textContent = r?.ok ? "Sent to Velox" : "Velox not running";
     setTimeout(() => (root.querySelector(".t").textContent = "Download"), 2000);
@@ -120,8 +120,8 @@
       const el = document.createElement("div");
       el.className = "it";
       el.innerHTML = `<span class="k"></span><span class="n"></span><span class="s"></span>`;
-      el.querySelector(".k").textContent = m.kind.toUpperCase();
-      el.querySelector(".n").textContent = label(m);
+      el.querySelector(".k").textContent = m.kind === "site" ? "VIDEO" : m.kind.toUpperCase();
+      el.querySelector(".n").textContent = m.kind === "site" ? m.title || label(m) : label(m);
       el.querySelector(".s").textContent = fmt(m.size);
       el.addEventListener("click", () => download(m));
       menu.appendChild(el);

@@ -150,6 +150,35 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   return true; // we call suggest asynchronously
 });
 
+// ─────────────────────────── video sites ───────────────────────────
+// Pages whose videos are resolved by Velox (yt-dlp) instead of sniffing.
+
+const SITE_HOSTS = ["vimeo.com", "dailymotion.com", "twitch.tv", "clips.twitch.tv", "tiktok.com", "instagram.com", "facebook.com", "x.com", "twitter.com", "reddit.com", "soundcloud.com", "bilibili.com", "streamable.com"];
+
+function isSiteUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = u.hostname.replace(/^(www|m)\./, "");
+  if (host === "youtube.com" || host === "music.youtube.com") return /^\/(watch|shorts\/|live\/)/.test(u.pathname);
+  if (host === "youtu.be") return u.pathname.length > 1;
+  return SITE_HOSTS.includes(host) && u.pathname.length > 1;
+}
+
+/** Keep a "this page's video" entry at the top of the tab's media list. */
+function syncSiteItem(tabId, url, title) {
+  let list = (media.get(tabId) || []).filter((m) => m.kind !== "site");
+  if (url && isSiteUrl(url)) {
+    list = [{ key: "site:" + url, url, kind: "site", title: (title || "").replace(/ - YouTube$/, ""), size: 0, ts: Date.now() }, ...list];
+  }
+  media.set(tabId, list);
+  persistMedia();
+  updateBadge(tabId);
+}
+
 // ─────────────────────────── stream detection ───────────────────────────
 
 function header(headers, name) {
@@ -187,6 +216,9 @@ chrome.storage.session
 chrome.webRequest.onHeadersReceived.addListener(
   (d) => {
     if (d.tabId < 0 || d.statusCode >= 400) return;
+    // YouTube's adaptive chunks are useless on their own – the page is
+    // handled as a site download instead.
+    if (/(^https?:\/\/[^/]*\.(googlevideo|ytimg)\.com\/)/.test(d.url)) return;
     const mime = header(d.responseHeaders, "content-type");
     const kind = classify(d.url, mime);
     if (!kind) return;
@@ -212,11 +244,13 @@ chrome.webRequest.onHeadersReceived.addListener(
   ["responseHeaders"],
 );
 
-chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === "loading" && info.url) {
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (info.url) {
+    // Real navigation clears sniffed streams; SPA navigations (YouTube) too.
     media.delete(tabId);
-    persistMedia();
-    updateBadge(tabId);
+    syncSiteItem(tabId, info.url, tab.title);
+  } else if (info.title || info.status === "complete") {
+    syncSiteItem(tabId, tab.url, tab.title);
   }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -285,6 +319,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         break;
       case "media": {
         const tabId = msg.tabId ?? sender.tab?.id;
+        const tab = tabId != null ? await chrome.tabs.get(tabId).catch(() => null) : null;
+        // Tabs opened before the extension loaded never fired onUpdated.
+        if (tab && isSiteUrl(tab.url) && !(media.get(tabId) || []).some((m) => m.kind === "site" && m.url === tab.url)) {
+          syncSiteItem(tabId, tab.url, tab.title);
+        }
         reply({ items: media.get(tabId) || [] });
         break;
       }

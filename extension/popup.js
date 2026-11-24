@@ -66,16 +66,16 @@ async function render() {
     const el = document.createElement("div");
     el.className = "item";
     el.innerHTML = `<span class="k"></span><div class="n"><div class="f"></div><div class="s"></div></div><button class="btn sm"></button>`;
-    el.querySelector(".k").textContent = m.kind.toUpperCase();
-    el.querySelector(".f").textContent = name(m.url);
+    el.querySelector(".k").textContent = m.kind === "site" ? (L === tr ? "VİDEO" : "VIDEO") : m.kind.toUpperCase();
+    el.querySelector(".f").textContent = m.kind === "site" ? m.title || name(m.url) : name(m.url);
     el.querySelector(".f").title = m.url;
-    el.querySelector(".s").textContent = [fmt(m.size), m.title].filter(Boolean).join(" · ");
+    el.querySelector(".s").textContent = m.kind === "site" ? new URL(m.url).hostname.replace(/^www\./, "") : [fmt(m.size), m.title].filter(Boolean).join(" · ");
     const b = el.querySelector("button");
     b.textContent = L.dl;
     b.disabled = !s.connected;
     b.addEventListener("click", async () => {
       const title = (tab?.title || "").replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 120);
-      const fileName = m.kind !== "http" && title ? `${title}.mp4` : null;
+      const fileName = (m.kind === "hls" || m.kind === "dash") && title ? `${title}.mp4` : null;
       const r = await msg({ type: "download", tabId: tab?.id, url: m.url, kind: m.kind, size: m.size, fileName, referrer: tab?.url });
       b.textContent = r?.ok ? L.sent : "!";
       b.classList.add("done");
