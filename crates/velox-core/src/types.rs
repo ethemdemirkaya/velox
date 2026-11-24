@@ -79,6 +79,9 @@ pub struct Segment {
     pub end: u64,
     /// Bytes `start..written` are on disk.
     pub written: u64,
+    /// A connection is currently working on this range (live view only).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub active: bool,
 }
 
 impl Segment {

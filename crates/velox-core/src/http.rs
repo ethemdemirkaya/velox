@@ -123,7 +123,7 @@ impl Live {
     }
 
     pub fn snapshot(&self) -> Vec<Segment> {
-        self.segments.lock().iter().map(|s| Segment { start: s.start, end: s.end, written: s.written }).collect()
+        self.segments.lock().iter().map(|s| Segment { start: s.start, end: s.end, written: s.written, active: s.active }).collect()
     }
 }
 
@@ -214,7 +214,7 @@ pub(crate) fn plan(total: u64, conns: u16) -> Vec<Segment> {
         .map(|i| {
             let start = i * size;
             let end = if i == n - 1 { total } else { start + size };
-            Segment { start, end, written: start }
+            Segment { start, end, written: start, active: false }
         })
         .collect()
 }
@@ -593,7 +593,7 @@ mod tests {
 
     #[test]
     fn steals_half() {
-        let live = Live::new(0, Some(64 << 20), &[Segment { start: 0, end: 64 << 20, written: 0 }], 0);
+        let live = Live::new(0, Some(64 << 20), &[Segment { start: 0, end: 64 << 20, written: 0, active: false }], 0);
         live.segments.lock()[0].active = true;
         let i = steal(&live).unwrap();
         let s = live.segments.lock();

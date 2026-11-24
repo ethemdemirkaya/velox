@@ -9,6 +9,7 @@ export interface Segment {
   start: number;
   end: number;
   written: number;
+  active?: boolean;
 }
 
 export interface Download {
@@ -87,6 +88,7 @@ export interface Settings {
   closeToTray: boolean;
   notifications: boolean;
   progressWindow: boolean;
+  progressDetails: boolean;
   captureEnabled: boolean;
   captureExtensions: string[];
   captureMinSizeKb: number;

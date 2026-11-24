@@ -213,7 +213,7 @@ pub(crate) async fn download(ctx: &SiteCtx, r: &Resolved, base: &std::path::Path
             resume
                 .iter()
                 .filter(|s| s.start >= offset && s.end <= offset + size.unwrap())
-                .map(|s| crate::Segment { start: s.start - offset, end: s.end - offset, written: s.written - offset })
+                .map(|s| crate::Segment { start: s.start - offset, end: s.end - offset, written: s.written - offset, active: false })
                 .collect()
         } else {
             vec![]

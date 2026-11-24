@@ -73,6 +73,10 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
+const PROGRESS_W: f64 = 540.0;
+const PROGRESS_H: f64 = 330.0;
+const PROGRESS_H_DETAILS: f64 = 600.0;
+
 /// Small always-in-front window that follows one download (IDM style).
 pub fn open_progress_window(app: &AppHandle, id: &str) {
     let label = format!("progress-{}", id.replace('-', ""));
@@ -82,9 +86,10 @@ pub fn open_progress_window(app: &AppHandle, id: &str) {
         return;
     }
     let url = WebviewUrl::App(format!("index.html#/progress/{id}").into());
+    let details = app.state::<AppState>().engine.settings().progress_details;
     let res = WebviewWindowBuilder::new(app, label, url)
         .title("Velox")
-        .inner_size(520.0, 318.0)
+        .inner_size(PROGRESS_W, if details { PROGRESS_H_DETAILS } else { PROGRESS_H })
         .resizable(false)
         .maximizable(false)
         .decorations(false)
