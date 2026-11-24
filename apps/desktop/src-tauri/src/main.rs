@@ -73,6 +73,31 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
+/// Small always-in-front window that follows one download (IDM style).
+pub fn open_progress_window(app: &AppHandle, id: &str) {
+    let label = format!("progress-{}", id.replace('-', ""));
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    let url = WebviewUrl::App(format!("index.html#/progress/{id}").into());
+    let res = WebviewWindowBuilder::new(app, label, url)
+        .title("Velox")
+        .inner_size(520.0, 318.0)
+        .resizable(false)
+        .maximizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .center()
+        .focused(true)
+        .background_color(tauri::window::Color(10, 10, 10, 255))
+        .build();
+    if let Err(e) = res {
+        tracing::error!("progress window: {e}");
+    }
+}
+
 /// A download handed to us by the browser extension.
 pub async fn capture(app: &AppHandle, req: AddRequest, silent: bool) {
     let state = app.state::<AppState>();
@@ -312,6 +337,23 @@ async fn write_clipboard(text: String) -> R<()> {
 }
 
 #[tauri::command]
+async fn tools_status() -> R<velox_core::ToolsStatus> {
+    Ok(velox_core::tools::status())
+}
+
+#[tauri::command]
+async fn install_tools(s: State<'_, AppState>) -> R<velox_core::ToolsStatus> {
+    let e = s.engine.clone();
+    e.install_tools().await
+}
+
+#[tauri::command]
+async fn show_progress(app: AppHandle, id: String) -> R<()> {
+    open_progress_window(&app, &id);
+    Ok(())
+}
+
+#[tauri::command]
 async fn quit(app: AppHandle) -> R<()> {
     app.state::<AppState>().engine.pause_all();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -393,6 +435,13 @@ fn forward_events(app: AppHandle) {
         loop {
             match rx.recv().await {
                 Ok(ev) => {
+                    if let EngineEvent::Added(d) = &ev {
+                        let show = app.state::<AppState>().engine.settings().progress_window;
+                        // Skip paused adds and Velox's own tool downloads.
+                        if show && d.record.status != Status::Paused && !d.record.file_name.starts_with("ffmpeg-tools") {
+                            open_progress_window(&app, &d.record.id);
+                        }
+                    }
                     if let EngineEvent::Updated(d) = &ev {
                         let fresh = d.record.finished_at.map(|t| velox_now() - t < 1500).unwrap_or(false);
                         if d.record.status == Status::Completed && fresh {
@@ -483,6 +532,9 @@ fn main() {
             check_update,
             install_update,
             read_clipboard,
+            tools_status,
+            install_tools,
+            show_progress,
             write_clipboard,
             quit,
         ])
