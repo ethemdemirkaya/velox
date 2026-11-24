@@ -31,13 +31,21 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi", "deb", "appimage", "dmg"],
+    "targets": [
+      "nsis",
+      "msi",
+      "deb",
+      "appimage",
+      "dmg"
+    ],
     "category": "Utility",
     "shortDescription": "Blazing-fast download manager",
     "longDescription": "Velox is an open-source download accelerator written in Rust with dynamic segmentation, browser integration and stream capture.",
     "copyright": "© 2026 Ethem Demirkaya — MIT OR Apache-2.0",
     "createUpdaterArtifacts": true,
-    "externalBin": ["binaries/velox-host"],
+    "externalBin": [
+      "binaries/velox-host"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -46,13 +54,27 @@
       "icons/icon.ico"
     ],
     "windows": {
-      "nsis": { "installMode": "currentUser" }
-    }
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "languages": [
+          "Turkish",
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "startMenuFolder": "Velox"
+      }
+    },
+    "licenseFile": "../../../LICENSE-MIT"
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE2RkMxMzk3NDg3NzBCMDIKUldRQ0MzZElseFA4RnFCYUFIcVpqUlNqZSs0SXg5djlMMGQxNHdhZkhuODBGZkJFYTNnMldWL00K",
-      "endpoints": ["https://github.com/ethemdemirkaya/velox/releases/latest/download/latest.json"]
+      "endpoints": [
+        "https://github.com/ethemdemirkaya/velox/releases/latest/download/latest.json"
+      ]
     }
   }
 }

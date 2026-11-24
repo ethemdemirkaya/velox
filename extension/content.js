@@ -18,10 +18,27 @@
   const MIN_H = 124;
   const dismissed = new WeakSet();
   const L = navigator.language.toLowerCase().startsWith("tr")
-    ? { dl: "Bu videoyu indir", sent: "Velox'a gönderildi", off: "Velox çalışmıyor", wait: "Gönderiliyor…" }
-    : { dl: "Download this video", sent: "Sent to Velox", off: "Velox is not running", wait: "Sending…" };
+    ? {
+        dl: "Bu videoyu indir", sent: "Velox'a gönderildi", off: "Velox çalışmıyor", wait: "Gönderiliyor…",
+        help: [["Tıkla", "Videoyu Velox ile indir"], ["Sürükle", "Düğmeyi istediğin yere taşı"], ["×", "Bu video için gizle"], ["Alt + tık", "Bağlantıyı tarayıcı indirsin"]],
+        open: "Velox'u aç", hideSite: "Bu sitede gösterme", reset: "Konumu sıfırla",
+      }
+    : {
+        dl: "Download this video", sent: "Sent to Velox", off: "Velox is not running", wait: "Sending…",
+        help: [["Click", "Download the video with Velox"], ["Drag", "Move this button anywhere"], ["×", "Hide for this video"], ["Alt + click", "Let the browser download a link"]],
+        open: "Open Velox", hideSite: "Don't show on this site", reset: "Reset position",
+      };
+  const HOST = location.hostname.replace(/^www\./, "");
+  const KEY_OFF = "pillOffset:" + HOST;
+  const KEY_HIDE = "pillHidden:" + HOST;
+  let offset = { dx: 0, dy: 0 };
+  let hiddenOnSite = false;
+  chrome.storage?.local.get([KEY_OFF, KEY_HIDE]).then((v) => {
+    if (v[KEY_OFF]) offset = v[KEY_OFF];
+    hiddenOnSite = !!v[KEY_HIDE];
+  }).catch(() => {});
 
-  let host, root, pill, label, menu, current, busy = false;
+  let host, root, pill, label, menu, info, current, busy = false;
 
   const fmt = (n) => {
     if (!n) return "";
@@ -92,9 +109,25 @@
         .go { display:flex; align-items:center; gap:8px; height:100%; padding:0 12px 0 10px; cursor:pointer; border:0;
               background:none; color:inherit; font:inherit; white-space:nowrap; }
         .go:hover { background:#1c1c1c; }
-        .x { width:26px; height:100%; border:0; border-left:1px solid #2a2a2a; background:none; color:#7a7a7a; cursor:pointer;
-             font:14px/1 system-ui; }
+        .p { cursor: grab; touch-action: none; user-select: none; }
+        .p.dragging { cursor: grabbing; opacity: .85; }
+        .x, .q { width:26px; height:100%; border:0; border-left:1px solid #2a2a2a; background:none; color:#7a7a7a; cursor:pointer;
+             font:600 12px/1 system-ui; }
+        .x { font-size:14px; font-weight:400; }
+        .q:hover, .q.on { color:#fff; background:#1f1f1f; }
         .x:hover { color:#fff; background:#ff3b30; }
+        .info { position:absolute; top:36px; right:0; width:280px; background:#0f0f0f; border:1px solid #2a2a2a; border-radius:8px;
+                padding:12px; display:none; box-shadow:0 16px 40px rgba(0,0,0,.5); font-weight:400; cursor:default; }
+        .info.open { display:block; }
+        .info h4 { margin:0 0 10px; display:flex; align-items:center; gap:8px; font:600 12.5px/1 "Inter","Segoe UI",system-ui,sans-serif; }
+        .row { display:grid; grid-template-columns:78px 1fr; gap:8px; padding:4px 0; font-size:11.5px; line-height:1.35; }
+        .row b { font:600 10.5px/1.6 ui-monospace,Consolas,monospace; color:#d4d4d4; }
+        .row span { color:#a1a1a1; }
+        .acts { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; padding-top:10px; border-top:1px solid #222; }
+        .acts button { height:24px; padding:0 9px; border-radius:5px; border:1px solid #2e2e2e; background:#161616; color:#e6e6e6;
+                       font:500 11px/1 "Inter","Segoe UI",system-ui,sans-serif; cursor:pointer; }
+        .acts button:hover { background:#222; }
+        .acts .primary { background:#f2f2f2; color:#0a0a0a; border-color:#f2f2f2; }
         svg { display:block; flex:none; }
         .menu { position:absolute; top:36px; right:0; min-width:270px; max-width:400px; background:#0f0f0f; border:1px solid #2a2a2a;
                 border-radius:8px; padding:4px; display:none; box-shadow:0 16px 40px rgba(0,0,0,.5); font-weight:400; }
@@ -111,15 +144,33 @@
             <svg width="13" height="13" viewBox="0 0 24 24"><path d="M3 3h4.1L12 12.4 16.9 3H21L12 18.6z" fill="#f2f2f2"/><rect x="10.6" y="19.6" width="2.8" height="2.8" fill="#ff3b30"/></svg>
             <span class="t"></span>
           </button>
+          <button class="q" title="?">?</button>
           <button class="x" title="✕">×</button>
         </div>
         <div class="menu"></div>
+        <div class="info"></div>
       </div>`;
     pill = root.querySelector(".go");
     label = root.querySelector(".t");
     menu = root.querySelector(".menu");
+    info = root.querySelector(".info");
     label.textContent = L.dl;
-    pill.addEventListener("click", onClick);
+    buildInfo();
+    pill.addEventListener("click", (e) => {
+      if (dragMoved) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      onClick(e);
+    });
+    const q = root.querySelector(".q");
+    q.addEventListener("click", (e) => {
+      e.stopPropagation();
+      menu.classList.remove("open");
+      q.classList.toggle("on", info.classList.toggle("open"));
+    });
+    enableDrag(root.querySelector(".p"));
     root.querySelector(".x").addEventListener("click", (e) => {
       e.stopPropagation();
       if (current) dismissed.add(current);
@@ -127,6 +178,78 @@
     });
     for (const ev of ["mousedown", "mouseup", "pointerdown", "dblclick"]) host.addEventListener(ev, (e) => e.stopPropagation());
     mount();
+  }
+
+  function buildInfo() {
+    info.innerHTML = `<h4><svg width="12" height="12" viewBox="0 0 24 24"><path d="M3 3h4.1L12 12.4 16.9 3H21L12 18.6z" fill="#f2f2f2"/><rect x="10.6" y="19.6" width="2.8" height="2.8" fill="#ff3b30"/></svg>Velox</h4>`;
+    for (const [k, v] of L.help) {
+      const r = document.createElement("div");
+      r.className = "row";
+      r.innerHTML = "<b></b><span></span>";
+      r.querySelector("b").textContent = k;
+      r.querySelector("span").textContent = v;
+      info.appendChild(r);
+    }
+    const acts = document.createElement("div");
+    acts.className = "acts";
+    const mk = (text, cls, fn) => {
+      const b = document.createElement("button");
+      b.textContent = text;
+      if (cls) b.className = cls;
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        fn();
+      });
+      acts.appendChild(b);
+    };
+    mk(L.open, "primary", () => chrome.runtime.sendMessage({ type: "show" }).catch(() => {}));
+    mk(L.reset, "", () => {
+      offset = { dx: 0, dy: 0 };
+      chrome.storage?.local.remove(KEY_OFF);
+      place();
+    });
+    mk(L.hideSite, "", () => {
+      hiddenOnSite = true;
+      chrome.storage?.local.set({ [KEY_HIDE]: true });
+      hide();
+    });
+    info.appendChild(acts);
+  }
+
+  // Drag the button anywhere; the offset (relative to the video's corner) is
+  // remembered per site. A press that doesn't move is a normal click.
+  let dragMoved = false;
+  function enableDrag(handle) {
+    let sx = 0, sy = 0, ox = 0, oy = 0, down = false;
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0 || e.target.closest(".x, .q")) return;
+      down = true;
+      dragMoved = false;
+      sx = e.clientX;
+      sy = e.clientY;
+      ox = offset.dx;
+      oy = offset.dy;
+      handle.setPointerCapture(e.pointerId);
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!down) return;
+      const dx = e.clientX - sx, dy = e.clientY - sy;
+      if (!dragMoved && Math.abs(dx) + Math.abs(dy) < 5) return;
+      dragMoved = true;
+      handle.classList.add("dragging");
+      menu.classList.remove("open");
+      offset = { dx: ox + dx, dy: oy + dy };
+      place();
+    });
+    const end = () => {
+      if (!down) return;
+      down = false;
+      handle.classList.remove("dragging");
+      if (dragMoved) chrome.storage?.local.set({ [KEY_OFF]: offset });
+      setTimeout(() => (dragMoved = false), 0);
+    };
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
   }
 
   function mount() {
@@ -137,6 +260,8 @@
   function hide() {
     if (host) host.style.display = "none";
     menu?.classList.remove("open");
+    info?.classList.remove("open");
+    root?.querySelector(".q")?.classList.remove("on");
     current = null;
   }
 
@@ -146,8 +271,8 @@
     const visible = r.width >= MIN_W && r.height >= MIN_H && r.bottom > 40 && r.top < innerHeight - 40 && r.right > 0 && r.left < innerWidth;
     if (!visible || !current.isConnected) return hide();
     const w = host.offsetWidth || 180;
-    const x = Math.min(innerWidth - w - 8, Math.max(8, r.right - w - 12));
-    const y = Math.min(innerHeight - 40, Math.max(8, r.top + 12));
+    const x = Math.min(innerWidth - w - 8, Math.max(8, r.right - w - 12 + offset.dx));
+    const y = Math.min(innerHeight - 40, Math.max(8, r.top + 12 + offset.dy));
     host.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
   }
 
@@ -168,7 +293,8 @@
 
   let refreshing = false;
   async function refresh() {
-    if (refreshing || busy) return;
+    if (refreshing || busy || dragMoved) return;
+    if (hiddenOnSite) return hide();
     refreshing = true;
     try {
       const v = pickVideo();

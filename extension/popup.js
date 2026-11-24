@@ -10,6 +10,8 @@ const tr = {
   media: "Bu sayfadaki medya",
   none: "Henüz video veya ses akışı bulunamadı. Bir video oynatmayı deneyin.",
   open: "Velox'u aç",
+  pillHidden: "Video düğmesi bu sitede gizli",
+  show: "Göster",
   dl: "İndir",
   sent: "Gönderildi",
 };
@@ -57,6 +59,16 @@ async function render() {
   $("#toggle").setAttribute("aria-checked", String(!s.paused));
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  try {
+    const key = "pillHidden:" + new URL(tab.url).hostname.replace(/^www\./, "");
+    const v = await chrome.storage.local.get(key);
+    $("#pillrow").hidden = !v[key];
+    $("#pillshow").onclick = async () => {
+      await chrome.storage.local.remove(key);
+      $("#pillrow").hidden = true;
+      chrome.tabs.reload(tab.id);
+    };
+  } catch {}
   const { items } = await msg({ type: "media", tabId: tab?.id });
   const list = $("#list");
   list.innerHTML = "";
