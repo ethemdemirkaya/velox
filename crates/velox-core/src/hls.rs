@@ -28,6 +28,94 @@ pub(crate) struct HlsCtx {
     pub global: Arc<RateLimiter>,
     pub cancel: CancellationToken,
     pub conns: u16,
+    /// Wanted height ("1080", "720", …) when the playlist is a master. `None` = best.
+    pub quality: Option<String>,
+}
+
+/// What to fetch for an HLS URL after looking at its master playlist.
+pub(crate) struct Plan {
+    /// Media playlist of the video (or the URL itself when it is not a master).
+    pub video: String,
+    /// Separate audio rendition (players that keep audio out of the video stream).
+    pub audio: Option<String>,
+}
+
+fn pick_variant<'a>(m: &'a m3u8_rs::MasterPlaylist, quality: Option<&str>) -> Option<&'a m3u8_rs::VariantStream> {
+    let vs = || m.variants.iter().filter(|v| !v.is_i_frame);
+    let height = |v: &m3u8_rs::VariantStream| v.resolution.map(|r| r.height as u32);
+    if let Some(want) = quality.and_then(|q| q.parse::<u32>().ok()) {
+        // Best stream not taller than wanted; else the smallest one there is.
+        if let Some(v) = vs().filter(|v| height(v).is_some_and(|h| h <= want)).max_by_key(|v| (height(v), v.bandwidth)) {
+            return Some(v);
+        }
+        if let Some(v) = vs().filter(|v| height(v).is_some()).min_by_key(|v| (height(v), v.bandwidth)) {
+            return Some(v);
+        }
+    }
+    vs().max_by_key(|v| (height(v), v.bandwidth))
+}
+
+/// Resolve a master playlist into the media playlists to download.
+pub(crate) async fn plan(ctx: &HlsCtx) -> Result<Plan, DlError> {
+    let body = get_bytes(ctx, &ctx.url, None).await?;
+    ctx.live.downloaded.fetch_sub(body.len() as u64, Ordering::Relaxed);
+    match m3u8_rs::parse_playlist_res(&body) {
+        Ok(Playlist::MasterPlaylist(m)) => {
+            let v = pick_variant(&m, ctx.quality.as_deref()).ok_or_else(|| DlError::Other("playlist has no variants".into()))?;
+            let audio = v.audio.as_ref().and_then(|group| {
+                let alts = m.alternatives.iter().filter(|a| a.media_type == m3u8_rs::AlternativeMediaType::Audio && &a.group_id == group && a.uri.is_some());
+                let alts: Vec<_> = alts.collect();
+                alts.iter().find(|a| a.default).or_else(|| alts.iter().find(|a| a.autoselect)).or(alts.first()).and_then(|a| a.uri.clone())
+            });
+            Ok(Plan { video: resolve(&ctx.url, &v.uri), audio: audio.map(|a| resolve(&ctx.url, &a)) })
+        }
+        Ok(Playlist::MediaPlaylist(_)) => Ok(Plan { video: ctx.url.clone(), audio: None }),
+        Err(_) => Err(DlError::Other("invalid m3u8 playlist".into())),
+    }
+}
+
+/// Qualities offered by a master playlist, best first, with a size estimate
+/// (bandwidth × duration). Empty for plain media playlists.
+pub(crate) async fn qualities(client: &Client, url: &str, headers: &HeaderMap) -> Vec<crate::site::QualityOption> {
+    let fetch = |u: String| {
+        let req = client.get(u).headers(headers.clone()).timeout(Duration::from_secs(6));
+        async move {
+            let r = req.send().await.ok()?;
+            if !r.status().is_success() {
+                return None;
+            }
+            r.bytes().await.ok()
+        }
+    };
+    let Some(body) = fetch(url.to_string()).await else { return vec![] };
+    let Ok(Playlist::MasterPlaylist(m)) = m3u8_rs::parse_playlist_res(&body) else { return vec![] };
+    // Best variant per height.
+    let mut by_h: Vec<(u32, &m3u8_rs::VariantStream)> = Vec::new();
+    for v in m.variants.iter().filter(|v| !v.is_i_frame) {
+        let Some(h) = v.resolution.map(|r| r.height as u32) else { continue };
+        match by_h.iter_mut().find(|(x, _)| *x == h) {
+            Some(e) if e.1.bandwidth < v.bandwidth => e.1 = v,
+            Some(_) => {}
+            None => by_h.push((h, v)),
+        }
+    }
+    if by_h.len() < 2 {
+        return vec![];
+    }
+    by_h.sort_by_key(|(h, _)| std::cmp::Reverse(*h));
+    // Duration from one media playlist (all variants share the timeline).
+    let media = fetch(resolve(url, &by_h[by_h.len() - 1].1.uri)).await;
+    let duration = match media.as_deref().map(m3u8_rs::parse_playlist_res) {
+        Some(Ok(Playlist::MediaPlaylist(mp))) if mp.end_list => mp.segments.iter().map(|s| s.duration as f64).sum::<f64>(),
+        _ => 0.0,
+    };
+    by_h.into_iter()
+        .map(|(h, v)| crate::site::QualityOption {
+            id: h.to_string(),
+            height: Some(h),
+            size: (duration > 0.0).then(|| (v.average_bandwidth.unwrap_or(v.bandwidth) as f64 / 8.0 * duration) as u64),
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -109,12 +197,7 @@ async fn load(ctx: &HlsCtx) -> Result<(Vec<Job>, Option<Job>), DlError> {
         let pl = m3u8_rs::parse_playlist_res(&body).map_err(|_| DlError::Other("invalid m3u8 playlist".into()))?;
         match pl {
             Playlist::MasterPlaylist(m) => {
-                let best = m
-                    .variants
-                    .iter()
-                    .filter(|v| !v.is_i_frame)
-                    .max_by_key(|v| v.bandwidth)
-                    .ok_or_else(|| DlError::Other("playlist has no variants".into()))?;
+                let best = pick_variant(&m, ctx.quality.as_deref()).ok_or_else(|| DlError::Other("playlist has no variants".into()))?;
                 url = resolve(&url, &best.uri);
             }
             Playlist::MediaPlaylist(m) => {
@@ -315,4 +398,32 @@ pub(crate) async fn run_dash(ctx: Arc<HlsCtx>, output: PathBuf) -> Result<(), Dl
     ctx.live.total.store(len, Ordering::Relaxed);
     ctx.live.downloaded.store(len, Ordering::Relaxed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MASTER: &str = "#EXTM3U\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",DEFAULT=YES,URI=\"audio/en.m3u8\"\n\
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"aud\"\nv360.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,AUDIO=\"aud\"\nv1080.m3u8\n\
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,AUDIO=\"aud\"\nv720.m3u8\n";
+
+    fn master() -> m3u8_rs::MasterPlaylist {
+        match m3u8_rs::parse_playlist_res(MASTER.as_bytes()).unwrap() {
+            Playlist::MasterPlaylist(m) => m,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn picks_variant_by_quality() {
+        let m = master();
+        assert_eq!(pick_variant(&m, None).unwrap().uri, "v1080.m3u8");
+        assert_eq!(pick_variant(&m, Some("720")).unwrap().uri, "v720.m3u8");
+        assert_eq!(pick_variant(&m, Some("480")).unwrap().uri, "v360.m3u8");
+        assert_eq!(pick_variant(&m, Some("144")).unwrap().uri, "v360.m3u8");
+        assert_eq!(m.alternatives[0].uri.as_deref(), Some("audio/en.m3u8"));
+    }
 }

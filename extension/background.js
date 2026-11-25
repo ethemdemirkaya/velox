@@ -110,7 +110,7 @@ async function cookiesFor(url) {
   }
 }
 
-async function handoff({ url, fileName, referrer, kind, size, silent }) {
+async function handoff({ url, fileName, referrer, headers, kind, size, silent }) {
   const cookies = await cookiesFor(url);
   const r = await send({
     type: "add",
@@ -119,6 +119,7 @@ async function handoff({ url, fileName, referrer, kind, size, silent }) {
     referrer: referrer || null,
     cookies: cookies || null,
     userAgent: navigator.userAgent,
+    headers: headers || [],
     kind: kind || null,
     sizeHint: size > 0 ? size : null,
     silent: !!silent,
@@ -271,6 +272,44 @@ function classify(url, mime) {
   return null;
 }
 
+// Players often live in an iframe on another domain and their CDN checks the
+// Referer / Origin of that player. Remember exactly what the browser sent for
+// each media request so Velox can replay it.
+const sent = new Map(); // requestId -> { referer, origin }
+const MEDIA_TYPES = ["media", "xmlhttprequest", "other"];
+chrome.webRequest.onSendHeaders.addListener(
+  (d) => {
+    if (d.tabId < 0) return;
+    const referer = header(d.requestHeaders, "referer");
+    const origin = header(d.requestHeaders, "origin");
+    if (referer || origin) sent.set(d.requestId, { referer, origin });
+    if (sent.size > 2000) sent.delete(sent.keys().next().value);
+  },
+  { urls: ["<all_urls>"], types: MEDIA_TYPES },
+  ["requestHeaders", "extraHeaders"],
+);
+const forget = (d) => sent.delete(d.requestId);
+chrome.webRequest.onCompleted.addListener(forget, { urls: ["<all_urls>"], types: MEDIA_TYPES });
+chrome.webRequest.onErrorOccurred.addListener(forget, { urls: ["<all_urls>"], types: MEDIA_TYPES });
+
+// Pre-roll / ad networks – their clips are never what the user wants.
+const AD_HOSTS = /(^|\.)(doubleclick\.net|googlesyndication\.com|googleadservices\.com|imasdk\.googleapis\.com|adnxs\.com|adsrvr\.org|advertising\.com|amazon-adsystem\.com|criteo\.com|taboola\.com|outbrain\.com|spotxchange\.com|springserve\.com|pubmatic\.com|rubiconproject\.com|vidoomy\.com|teads\.tv|smartadserver\.com|adform\.net)$/i;
+function isAd(url) {
+  try {
+    const u = new URL(url);
+    return AD_HOSTS.test(u.hostname) || /\/(ads?|vast|vpaid|preroll|commercials?)\//i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+const RANK = { site: 0, hls: 1, dash: 2, http: 3 };
+/** Best candidates first: the page's video, streams (first seen = master
+ *  playlist), then direct files by size. */
+function rank(list) {
+  return list.sort((a, b) => (RANK[a.kind] ?? 9) - (RANK[b.kind] ?? 9) || (a.kind === "http" ? (b.size || 0) - (a.size || 0) : a.ts - b.ts));
+}
+
 let saveTimer = 0;
 function persistMedia() {
   clearTimeout(saveTimer);
@@ -290,7 +329,10 @@ chrome.storage.session
 
 chrome.webRequest.onHeadersReceived.addListener(
   (d) => {
+    const req = sent.get(d.requestId);
+    sent.delete(d.requestId);
     if (d.tabId < 0 || d.statusCode >= 400) return;
+    if (isAd(d.url)) return;
     // YouTube's adaptive chunks are useless on their own – the page is
     // handled as a site download instead.
     if (/(^https?:\/\/[^/]*\.(googlevideo|ytimg)\.com\/)/.test(d.url)) return;
@@ -298,16 +340,30 @@ chrome.webRequest.onHeadersReceived.addListener(
     const kind = classify(d.url, mime);
     if (!kind) return;
     const size = +header(d.responseHeaders, "content-length") || 0;
-    // Skip tiny media (thumbnails, beeps) and the many segment chunks of streams.
-    if (kind === "http" && (size < 1024 * 1024 || /\.(ts|m4s)(\?|$)/i.test(d.url))) return;
+    // Players fetch big files in small ranges – judge by the full size.
     const range = header(d.responseHeaders, "content-range");
     const total = range ? +range.split("/")[1] || size : size;
+    // Skip tiny media (thumbnails, beeps) and the many segment chunks of streams.
+    if (kind === "http" && ((total > 0 && total < 1024 * 1024) || /\.(ts|m4s|aac)(\?|$)/i.test(d.url))) return;
     let list = media.get(d.tabId) || [];
     const key = d.url.split("#")[0];
     // Range requests of the same file show up many times – keep one entry.
     const base = kind === "http" ? key.replace(/[?&](range|bytes)=[^&]*/gi, "") : key;
     if (list.some((m) => m.key === base)) return;
-    list = [{ key: base, url: d.url, kind, mime, size: total, ts: Date.now() }, ...list].slice(0, 25);
+    const item = {
+      key: base,
+      url: d.url,
+      kind,
+      mime,
+      size: total,
+      ts: Date.now(),
+      frameId: d.frameId,
+      referer: req?.referer || "",
+      origin: req?.origin || "",
+      // Fallback when the browser sent no Referer: the requesting document.
+      initiator: d.initiator || "",
+    };
+    list = rank([item, ...list]).slice(0, 30);
     media.set(d.tabId, list);
     chrome.tabs.get(d.tabId).then((tab) => {
       for (const m of list) if (!m.title) m.title = tab.title;
@@ -387,14 +443,21 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         if (tab && isSiteUrl(tab.url) && !(media.get(tabId) || []).some((m) => m.kind === "site" && m.url === tab.url)) {
           syncSiteItem(tabId, tab.url, tab.title);
         }
-        reply({ items: media.get(tabId) || [] });
+        const items = media.get(tabId) || [];
+        // The pill in an embedded player asks for its own streams first.
+        const frameId = msg.tabId == null ? sender.frameId : undefined;
+        const mine = frameId ? items.filter((m) => m.frameId === frameId || m.kind === "site") : [];
+        reply({ items: mine.length ? mine : items });
         break;
       }
       case "download": {
         const tabId = msg.tabId ?? sender.tab?.id;
-        let referrer = msg.referrer;
+        // Replay the Referer / Origin the player itself used for this stream.
+        const seen = (tabId != null ? media.get(tabId) || [] : []).find((m) => m.url === msg.url || m.key === msg.url);
+        let referrer = seen?.referer || msg.referrer || (seen?.initiator ? seen.initiator + "/" : "");
         if (!referrer && tabId != null) referrer = (await chrome.tabs.get(tabId).catch(() => null))?.url;
-        reply(await handoff({ url: msg.url, fileName: msg.fileName, referrer, kind: msg.kind, size: msg.size, silent: msg.silent }));
+        const headers = seen?.origin ? [["Origin", seen.origin]] : [];
+        reply(await handoff({ url: msg.url, fileName: msg.fileName, referrer, headers, kind: msg.kind, size: msg.size, silent: msg.silent }));
         break;
       }
       case "prefetch":

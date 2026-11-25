@@ -387,6 +387,7 @@ pub(crate) async fn download(ctx: &SiteCtx, r: &Resolved, base: &std::path::Path
                 global: ctx.global.clone(),
                 cancel: ctx.cancel.clone(),
                 conns: ctx.conns.min(16),
+                quality: None,
             });
             crate::hls::run(hctx, part.clone(), 0, 0).await.map(|_| 0)
         } else {

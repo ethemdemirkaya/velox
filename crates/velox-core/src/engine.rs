@@ -308,22 +308,23 @@ impl Engine {
                 qualities: r.qualities,
             });
         }
+        let client = self.0.client.read().clone();
+        let headers = header_map(&req.referrer, &req.cookies, &req.user_agent, &req.headers);
         if kind != Kind::Http {
+            let qualities = if kind == Kind::Hls { hls::qualities(&client, &url, &headers).await } else { vec![] };
             return Ok(Resolved {
                 file_name: stream_name(&url, req.file_name.as_deref()),
                 final_url: url.clone(),
+                total: None,
                 url,
                 kind,
-                total: None,
                 resumable: kind == Kind::Hls,
                 content_type: None,
                 etag: None,
                 last_modified: None,
-                qualities: vec![],
+                qualities,
             });
         }
-        let client = self.0.client.read().clone();
-        let headers = header_map(&req.referrer, &req.cookies, &req.user_agent, &req.headers);
         let mut p = http::probe(&client, &url, &headers).await.map_err(|e| e.to_string())?;
         if let Some(resp) = p.response.take() {
             let mut warm = self.0.warm.lock();
@@ -331,6 +332,7 @@ impl Engine {
             warm.insert(url.clone(), (Instant::now(), resp));
         }
         if p.kind != Kind::Http {
+            let qualities = if p.kind == Kind::Hls { hls::qualities(&client, &p.final_url, &headers).await } else { vec![] };
             return Ok(Resolved {
                 file_name: stream_name(&p.final_url, req.file_name.as_deref()),
                 url,
@@ -341,7 +343,7 @@ impl Engine {
                 etag: None,
                 last_modified: None,
                 final_url: p.final_url,
-                qualities: vec![],
+                qualities,
             });
         }
         let file_name = req.file_name.as_deref().map(util::sanitize).filter(|s| !s.is_empty()).unwrap_or(p.file_name);
@@ -501,7 +503,7 @@ impl Engine {
                 finalize(&part, &path).map(Some)
             }
             Kind::Hls => {
-                let ctx = Arc::new(HlsCtx {
+                let mut ctx = HlsCtx {
                     client,
                     url: rec.url.clone(),
                     headers,
@@ -509,8 +511,14 @@ impl Engine {
                     global: self.0.global.clone(),
                     cancel,
                     conns: rec.connections.min(16),
-                });
-                let done = hls::run(ctx, part.clone(), rec.hls_done, rec.hls_bytes).await?;
+                    quality: rec.quality.clone(),
+                };
+                let plan = hls::plan(&ctx).await?;
+                ctx.url = plan.video;
+                if let Some(audio_url) = plan.audio {
+                    return self.run_hls_av(ctx, audio_url, &part, &path, &rec).await.map(Some);
+                }
+                let done = hls::run(Arc::new(ctx), part.clone(), rec.hls_done, rec.hls_bytes).await?;
                 if done.ext == "ts" {
                     self.set_status(&rec.id, Status::Merging);
                     let tmp = path.with_extension("remux.mp4");
@@ -540,6 +548,7 @@ impl Engine {
                     global: self.0.global.clone(),
                     cancel,
                     conns: 1,
+                    quality: None,
                 });
                 hls::run_dash(ctx, part.clone()).await?;
                 finalize(&part, &path).map(Some)
@@ -573,6 +582,39 @@ impl Engine {
             let _ = std::fs::remove_file(p);
         }
         finalize(&tmp, &path).map(Some)
+    }
+
+    /// HLS whose audio is a separate rendition: fetch the audio playlist first
+    /// (small, own progress), then the video with the job's resumable progress,
+    /// and merge both losslessly.
+    async fn run_hls_av(&self, ctx: HlsCtx, audio_url: String, part: &Path, path: &Path, rec: &Record) -> Result<String, DlError> {
+        let audio_done = part.with_extension("audio.ts");
+        if !audio_done.exists() {
+            let audio_tmp = part.with_extension("audio.part");
+            let actx = Arc::new(HlsCtx {
+                client: ctx.client.clone(),
+                url: audio_url,
+                headers: ctx.headers.clone(),
+                live: Arc::new(Live::new(0, None, &[], 0)),
+                global: ctx.global.clone(),
+                cancel: ctx.cancel.clone(),
+                conns: ctx.conns,
+                quality: None,
+            });
+            hls::run(actx, audio_tmp.clone(), 0, 0).await?;
+            std::fs::rename(&audio_tmp, &audio_done)?;
+        }
+        hls::run(Arc::new(ctx), part.to_path_buf(), rec.hls_done, rec.hls_bytes).await?;
+        if tools::ffmpeg().is_none() {
+            let _ = Box::pin(self.install_tools()).await;
+        }
+        self.set_status(&rec.id, Status::Merging);
+        let out = path.with_extension("mp4");
+        let tmp = out.with_extension("merge.mp4");
+        site::merge(&[part.to_path_buf(), audio_done.clone()], &tmp).await?;
+        let _ = std::fs::remove_file(part);
+        let _ = std::fs::remove_file(&audio_done);
+        finalize(&tmp, &out)
     }
 
     /// Install yt-dlp and (on Windows) ffmpeg into the private tools folder.

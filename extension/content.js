@@ -88,10 +88,13 @@
     try {
       items = (await chrome.runtime.sendMessage({ type: "media" }))?.items || [];
     } catch {}
-    if (items.length) return items;
+    // A plain <video src="…mp4"> is the most precise answer for this element.
     const src = video.currentSrc || video.src;
-    if (src && /^https?:/.test(src)) return [{ kind: "http", url: src }];
-    return [];
+    if (src && /^https?:/.test(src) && !/\.m3u8|\.mpd/i.test(src)) {
+      const same = items.find((m) => m.url === src || m.key === src.split("#")[0]);
+      return same ? [same, ...items.filter((m) => m !== same)] : [{ kind: "http", url: src }, ...items];
+    }
+    return items;
   }
 
   // ── UI (closed shadow root so pages can't restyle it) ────────────────────
@@ -318,11 +321,22 @@
   async function send(m) {
     busy = true;
     label.textContent = L.wait;
-    const title = document.title.replace(/[\\/:*?"<>|]+/g, " ").replace(/ - YouTube$/, "").trim().slice(0, 120);
-    const fileName = (m.kind === "hls" || m.kind === "dash") && title ? `${title}.mp4` : null;
+    // Inside an embedded player the frame's own title is usually empty or
+    // generic – the tab title (stored with the stream) names the video.
+    const title = (m.title || document.title).replace(/[\\/:*?"<>|]+/g, " ").replace(/ - YouTube$/, "").trim().slice(0, 120);
+    let fileName = (m.kind === "hls" || m.kind === "dash") && title ? `${title}.mp4` : null;
+    if (m.kind === "http" && title) {
+      // Player files are often called "720.mp4" or a hash – name them after the video.
+      let base = "";
+      try {
+        base = decodeURIComponent(new URL(m.url).pathname.split("/").pop() || "");
+      } catch {}
+      const [, stem = "", ext = "mp4"] = base.match(/^(.*?)(?:\.([a-z0-9]{2,4}))?$/i) || [];
+      if (!/[a-z]{4,}/i.test(stem) || /^[a-f0-9-]{16,}$/i.test(stem)) fileName = `${title}.${ext.toLowerCase()}`;
+    }
     let r;
     try {
-      r = await chrome.runtime.sendMessage({ type: "download", url: m.url, kind: m.kind, fileName, size: m.size, referrer: location.href });
+      r = await chrome.runtime.sendMessage({ type: "download", url: m.url, kind: m.kind, fileName, size: m.size, referrer: m.referer || location.href });
     } catch {}
     label.textContent = r?.ok ? L.sent : L.off;
     menu.classList.remove("open");
