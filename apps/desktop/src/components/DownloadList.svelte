@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from "./Icon.svelte";
   import DownloadRow from "./DownloadRow.svelte";
+  import ContextMenu from "./ContextMenu.svelte";
   import { store, type Sort } from "../lib/store.svelte";
   import { t, type I18nKey } from "../lib/i18n.svelte";
   import { api } from "../lib/api";
@@ -25,6 +26,9 @@
   function cycleSort() {
     store.sort = sorts[(sorts.indexOf(store.sort) + 1) % sorts.length];
   }
+
+  let cleanOpen = $state(false);
+  const sel = $derived(store.multi.length);
 
   // Drop links or text onto the list to add them.
   let dragging = $state(false);
@@ -55,11 +59,27 @@
       <Icon name="pause" size={14} />
       <span class="lbl">{t("action.pauseAll")}</span>
     </button>
-    {#if (store.counts.completed ?? 0) > 0}
-      <button class="btn ghost sm" onclick={() => api.clearCompleted()}>
-        <Icon name="check" size={14} />
-        <span class="lbl">{t("action.clear")}</span>
-      </button>
+    {#if store.all.length > 0}
+      <div class="clean">
+        <button class="btn ghost sm" class:open={cleanOpen} onclick={() => (cleanOpen = !cleanOpen)}>
+          <Icon name="trash" size={14} />
+          <span class="lbl">{t("clean.menu")}</span>
+        </button>
+        {#if cleanOpen}
+          <div class="pop" role="menu">
+            <button role="menuitem" disabled={!store.counts.completed} onclick={() => ((cleanOpen = false), store.clearBy("completed"))}>
+              <Icon name="check" size={14} /><span>{t("clean.completed")}</span><b class="num">{store.counts.completed ?? 0}</b>
+            </button>
+            <button role="menuitem" disabled={!store.counts.failed} onclick={() => ((cleanOpen = false), store.clearBy("failed"))}>
+              <Icon name="alert" size={14} /><span>{t("clean.failed")}</span><b class="num">{store.counts.failed ?? 0}</b>
+            </button>
+            <div class="div"></div>
+            <button role="menuitem" class="danger" onclick={() => ((cleanOpen = false), store.clearBy("all"))}>
+              <Icon name="trash" size={14} /><span>{t("clean.all")}</span><b class="num">{store.all.length}</b>
+            </button>
+          </div>
+        {/if}
+      </div>
     {/if}
   </div>
 </div>
@@ -110,6 +130,23 @@
   {/each}
 </div>
 
+<svelte:window onmousedown={(e) => cleanOpen && !(e.target as HTMLElement).closest(".clean") && (cleanOpen = false)} />
+
+{#if sel > 1}
+  <div class="bulk" role="toolbar">
+    <span class="count num">{t("bulk.selected", { n: sel })}</span>
+    <span class="vsep"></span>
+    <button class="btn ghost sm" onclick={() => store.resumeMany(store.targets())}><Icon name="play" size={13} />{t("action.resume")}</button>
+    <button class="btn ghost sm" onclick={() => store.pauseMany(store.targets())}><Icon name="pause" size={14} />{t("action.pause")}</button>
+    <button class="btn ghost sm" onclick={() => store.removeFromList(store.targets())}><Icon name="x" size={14} />{t("menu.removeList")}</button>
+    <button class="btn ghost sm danger" onclick={() => store.askRemove(store.targets())}><Icon name="trash" size={14} />{t("menu.deleteFile")}</button>
+    <span class="vsep"></span>
+    <button class="btn ghost sm icon" title={t("bulk.clear")} onclick={() => store.clearSelection()}><Icon name="x" size={13} /></button>
+  </div>
+{/if}
+
+{#if store.menu}<ContextMenu />{/if}
+
 <style>
   .toolbar {
     height: 54px;
@@ -147,6 +184,89 @@
       width: 28px;
       padding: 0;
     }
+  }
+  .clean {
+    position: relative;
+  }
+  .clean .btn.open {
+    background: var(--surface-3);
+    color: var(--text);
+  }
+  .pop {
+    position: absolute;
+    right: 0;
+    top: 32px;
+    z-index: 30;
+    min-width: 230px;
+    padding: 4px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-2);
+    border-radius: var(--radius-l);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+    animation: pop 0.14s var(--ease-out);
+  }
+  .pop button {
+    width: 100%;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 10px;
+    border-radius: var(--radius);
+    color: var(--text-2);
+    text-align: left;
+  }
+  .pop button:hover:not(:disabled) {
+    background: var(--surface-3);
+    color: var(--text);
+  }
+  .pop button:disabled {
+    opacity: 0.4;
+  }
+  .pop button span {
+    flex: 1;
+  }
+  .pop button b {
+    font-weight: 500;
+    font-size: 11px;
+    color: var(--text-3);
+  }
+  .pop .danger:hover {
+    color: var(--red) !important;
+  }
+  .pop .div {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border-2);
+  }
+  .bulk {
+    position: fixed;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 42px;
+    padding: 0 6px 0 14px;
+    background: var(--surface-2);
+    border: 1px solid var(--border-3);
+    border-radius: 12px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+    animation: pop 0.16s var(--ease-out);
+    white-space: nowrap;
+  }
+  .bulk .count {
+    font-weight: 600;
+    font-size: 12.5px;
+    margin-right: 4px;
+  }
+  .bulk .vsep {
+    width: 1px;
+    height: 18px;
+    margin: 0 6px;
+    background: var(--border-3);
   }
   .sep {
     width: 1px;
@@ -186,7 +306,7 @@
     outline-color: var(--border-3);
   }
   :global(.main) {
-    --cols: minmax(200px, 1fr) 84px minmax(120px, 200px) 92px 72px 64px;
+    --cols: minmax(200px, 1fr) 84px minmax(120px, 200px) 92px 72px 92px;
   }
   @container main (max-width: 860px) {
     .head {

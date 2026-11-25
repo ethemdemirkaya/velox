@@ -26,15 +26,17 @@
 
 <div
   class="row"
-  class:sel={store.selected === d.id}
+  class:sel={store.isSelected(d.id)}
+  class:multi={store.multi.length > 1 && store.isSelected(d.id)}
   class:active
   class:failed={d.status === "failed"}
   class:done
   data-row={d.id}
   role="option"
-  aria-selected={store.selected === d.id}
+  aria-selected={store.isSelected(d.id)}
   tabindex="-1"
-  onclick={() => (store.selected = store.selected === d.id ? null : d.id)}
+  onclick={(e) => store.click(d.id, e)}
+  oncontextmenu={(e) => store.openMenu(d.id, e)}
   ondblclick={() => (done ? api.openFile(d.id) : store.toggle(d))}
   onkeydown={() => {}}
 >
@@ -87,6 +89,9 @@
     <button class="btn ghost sm icon" title={t("action.folder")} onclick={(e) => (e.stopPropagation(), api.showInFolder(d.id))}>
       <Icon name="folder" size={14} />
     </button>
+    <button class="btn ghost sm icon rm" title={t("menu.removeList")} onclick={(e) => (e.stopPropagation(), store.removeFromList([d.id]))}>
+      <Icon name="x" size={14} />
+    </button>
   </div>
 </div>
 
@@ -107,6 +112,12 @@
   }
   .row.sel {
     background: var(--surface-2);
+  }
+  .row.multi {
+    background: #1c1c1c;
+  }
+  .rm:hover {
+    color: var(--red);
   }
   .row.sel::before {
     content: "";

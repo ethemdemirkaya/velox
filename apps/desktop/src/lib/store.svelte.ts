@@ -20,7 +20,13 @@ class AppStore {
   addOpen = $state(false);
   addPrefill = $state("");
   paletteOpen = $state(false);
-  removeTarget = $state<string | null>(null);
+  /** Downloads waiting for the remove confirmation. */
+  removeTarget = $state<string[] | null>(null);
+  /** Multi-selection (Ctrl / Shift click, Ctrl+A). */
+  multi = $state<string[]>([]);
+  /** Open context menu. */
+  menu = $state<{ x: number; y: number; ids: string[] } | null>(null);
+  private anchor: string | null = null;
 
   /** Per-download speed history (not deeply reactive – replaced each tick). */
   history = $state.raw<Record<string, number[]>>({});
@@ -104,6 +110,7 @@ class AppStore {
         case "removed":
           delete this.byId[e.data];
           if (this.selected === e.data) this.selected = null;
+          if (this.multi.includes(e.data)) this.multi = this.multi.filter((x) => x !== e.data);
           break;
         case "progress":
           this.applyProgress(e.data);
@@ -189,12 +196,102 @@ class AppStore {
     return ACTIVE.includes(d.status);
   }
 
+  // ── selection ────────────────────────────────────────────────────────────
+
+  isSelected(id: string) {
+    return this.multi.includes(id) || (this.multi.length === 0 && this.selected === id);
+  }
+
+  /** Explorer-style click: plain = single, Ctrl = toggle, Shift = range. */
+  click(id: string, e: MouseEvent) {
+    if (e.shiftKey && this.anchor) {
+      const ids = this.visible.map((d) => d.id);
+      const a = ids.indexOf(this.anchor);
+      const b = ids.indexOf(id);
+      if (a >= 0 && b >= 0) {
+        this.multi = ids.slice(Math.min(a, b), Math.max(a, b) + 1);
+        this.selected = id;
+        return;
+      }
+    }
+    if (e.ctrlKey || e.metaKey) {
+      const base = this.multi.length ? this.multi : this.selected ? [this.selected] : [];
+      this.multi = base.includes(id) ? base.filter((x) => x !== id) : [...base, id];
+      this.selected = this.multi.at(-1) ?? null;
+      this.anchor = id;
+      return;
+    }
+    if (this.selected === id && this.multi.length <= 1) {
+      this.clearSelection();
+    } else {
+      this.selected = id;
+      this.multi = [id];
+      this.anchor = id;
+    }
+  }
+
+  selectAll() {
+    this.multi = this.visible.map((d) => d.id);
+    this.selected = this.multi.at(-1) ?? null;
+  }
+
+  clearSelection() {
+    this.selected = null;
+    this.multi = [];
+    this.anchor = null;
+  }
+
+  /** What an action applies to: the multi-selection, else the focused row. */
+  targets(): string[] {
+    return this.multi.length ? [...this.multi] : this.selected ? [this.selected] : [];
+  }
+
+  openMenu(id: string, e: MouseEvent) {
+    e.preventDefault();
+    if (!this.isSelected(id)) {
+      this.selected = id;
+      this.multi = [id];
+      this.anchor = id;
+    }
+    this.menu = { x: e.clientX, y: e.clientY, ids: this.targets() };
+  }
+
+  // ── bulk actions ─────────────────────────────────────────────────────────
+
+  async pauseMany(ids: string[]) {
+    await Promise.all(ids.filter((id) => this.byId[id] && this.isActive(this.byId[id])).map((id) => api.pause(id)));
+  }
+
+  async resumeMany(ids: string[]) {
+    await Promise.all(
+      ids.filter((id) => this.byId[id] && !this.isActive(this.byId[id]) && this.byId[id].status !== "completed").map((id) => api.resume(id)),
+    );
+  }
+
+  askRemove(ids: string[]) {
+    if (ids.length) this.removeTarget = ids;
+  }
+
+  /** Remove from the list without touching files – no confirmation needed. */
+  async removeFromList(ids: string[]) {
+    await Promise.all(ids.map((id) => api.remove(id, false)));
+    toasts.push({ kind: "info", title: t("toast.removed", { n: ids.length }), timeout: 2500 });
+  }
+
+  async clearBy(kind: "completed" | "failed" | "all") {
+    if (kind === "all") return this.askRemove(this.all.map((d) => d.id));
+    const ids = this.all.filter((d) => d.status === kind).map((d) => d.id);
+    if (ids.length) await this.removeFromList(ids);
+  }
+
   moveSelection(delta: number) {
     const list = this.visible;
     if (!list.length) return;
     const i = list.findIndex((d) => d.id === this.selected);
     const n = i < 0 ? (delta > 0 ? 0 : list.length - 1) : Math.max(0, Math.min(list.length - 1, i + delta));
     this.selected = list[n].id;
+    this.multi = [list[n].id];
+    this.anchor = list[n].id;
     document.querySelector(`[data-row="${list[n].id}"]`)?.scrollIntoView({ block: "nearest" });
   }
 }

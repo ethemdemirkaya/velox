@@ -35,7 +35,7 @@
     <div class="inner">
       <div class="head">
         <FileIcon name={d.fileName} category={d.category} size={40} live={active} />
-        <button class="btn ghost sm icon close" onclick={() => (store.selected = null)} aria-label={t("action.close")}>
+        <button class="btn ghost sm icon close" onclick={() => store.clearSelection()} aria-label={t("action.close")}>
           <Icon name="x" size={14} />
         </button>
       </div>
@@ -125,7 +125,7 @@
         </button>
       {/if}
       <button class="btn icon" title={t("action.folder")} onclick={() => api.showInFolder(d.id)}><Icon name="folder" size={14} /></button>
-      <button class="btn icon danger" title={t("action.remove")} onclick={() => (store.removeTarget = d.id)}><Icon name="trash" size={14} /></button>
+      <button class="btn icon danger" title={t("action.remove")} onclick={() => store.askRemove([d.id])}><Icon name="trash" size={14} /></button>
     </div>
   {/key}
 </aside>

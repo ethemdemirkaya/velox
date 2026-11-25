@@ -90,10 +90,17 @@
         if (cur?.status === "completed") api.openFile(cur.id);
         break;
       case "Delete":
-        if (cur) store.removeTarget = cur.id;
+        store.askRemove(store.targets());
         break;
       case "Escape":
-        store.selected = null;
+        store.clearSelection();
+        break;
+      case "a":
+      case "A":
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          store.selectAll();
+        }
         break;
     }
   }
@@ -117,7 +124,7 @@
           <DownloadList />
         {/if}
       </main>
-      {#if store.page === "main" && store.current}
+      {#if store.page === "main" && store.current && store.multi.length <= 1}
         <DetailPanel />
       {/if}
     </div>
