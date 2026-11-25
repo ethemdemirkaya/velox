@@ -28,6 +28,8 @@
 | **Adaptive & polite** | Connections ramp up gradually; if a server caps connections per client, extra workers step aside and the limit settles at what the server tolerates instead of failing. |
 | **Crash-safe resume** | Progress is persisted to SQLite every 2 s. Pause, quit, reboot — downloads continue where they left off (validated with `If-Range`). |
 | **Browser extension** | Chrome / Edge / Brave (Manifest V3). Captures downloads automatically, forwards cookies & referrer, hold <kbd>Alt</kbd> to let the browser handle a click. |
+| **Video sites** | YouTube, X/Twitter, Instagram, TikTok, Vimeo, Twitch, Reddit and more. Pick the quality (4K…144p or audio only); Velox fetches the streams with its own multi-connection engine and merges them losslessly. yt-dlp and ffmpeg are installed automatically on first use. |
+| **IDM-style UX** | A *Download this video* button pinned on videos (drag it anywhere, ? for help), a confirm dialog, and a per-download window with live connection details that turns into *Open / Open folder* when done. |
 | **Stream capture** | Detects HLS (`.m3u8`, incl. AES-128) and DASH (`.mpd`) streams while you watch; a floating *Download* pill appears on videos. HLS segments are fetched in parallel. |
 | **Speed limiter** | Global and per-download token-bucket limits. |
 | **Scheduler** | Start the queue at a given time, pause at another, shut down or sleep when done. |
@@ -110,7 +112,8 @@ signs updater artifacts and attaches the extension zip to a draft release.
 
 * **Dinamik segmentasyon:** 32'ye kadar paralel bağlantı. Bir bağlantı işini bitirince en büyük kalan parçanın yarısını devralır, böylece son bayta kadar tüm bağlantılar çalışır.
 * **Tarayıcı eklentisi:** Chrome / Edge / Brave. İndirmeleri otomatik yakalar; tarayıcının indirmesini istediğinizde <kbd>Alt</kbd> tuşuna basılı tutarak tıklayın.
-* **Video yakalama:** HLS (`.m3u8`, AES-128 dahil) ve DASH akışlarını algılar, videoların üzerinde *İndir* düğmesi gösterir.
+* **Video siteleri:** YouTube, X, Instagram, TikTok, Vimeo, Twitch… Kalite seçimi (4K…144p veya sadece ses). Videoların üstünde sürüklenebilir *Bu videoyu indir* düğmesi.
+* **Akış yakalama:** HLS (`.m3u8`, AES-128 dahil) ve DASH akışlarını algılar.
 * **Devam ettirme:** İlerleme SQLite'a kaydedilir; kapatıp açsanız bile kaldığı yerden devam eder.
 * **Hız sınırı, zamanlayıcı, otomatik kategori klasörleri, pano izleme, tepside çalışma, otomatik güncelleme.**
 * <kbd>Ctrl</kbd>+<kbd>K</kbd> komut paleti, tamamen klavyeyle kullanılabilir arayüz. Türkçe ve İngilizce.
