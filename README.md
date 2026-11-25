@@ -54,8 +54,9 @@ Your numbers depend on your line and the server.
 
 ## Install
 
-1. Download the installer for your OS from the [latest release](https://github.com/ethemdemirkaya/velox/releases/latest)
-   (`.exe` for Windows, `.dmg` for macOS, `.AppImage`/`.deb` for Linux).
+1. Download the installer for your OS from the [latest release](https://github.com/ethemdemirkaya/velox/releases/latest):
+   **`Velox-Setup-x.y.z.exe`** on Windows (Velox's own installer, `/S` for silent installs), `.dmg` on macOS,
+   `.AppImage`/`.deb` on Linux.
 2. Open Velox once — it registers the browser bridge (`com.velox.host`) automatically.
 3. Browser extension: download `velox-extension.zip` from the same release, unzip it, open
    `chrome://extensions`, enable **Developer mode**, click **Load unpacked** and pick the folder.
@@ -76,6 +77,7 @@ Your numbers depend on your line and the server.
 | [`crates/velox-host`](crates/velox-host) | Native-messaging host started by the browser. Relays JSON to the running app and launches it if needed. |
 | [`apps/desktop`](apps/desktop) | Tauri 2 shell (tray, single instance, autostart, updater, clipboard watcher, IPC server) and the Svelte 5 UI. |
 | [`extension`](extension) | Chromium extension: download capture, stream detection, context menus, popup. |
+| [`apps/setup`](apps/setup) | Velox Setup – the custom dark installer (embeds the app, the bridge and the extension; zstd-compressed). |
 
 A few details that matter for speed:
 

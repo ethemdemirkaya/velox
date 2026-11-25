@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="color-scheme" content="dark" />
+    <title>Velox Setup</title>
+    <link rel="stylesheet" href="setup.css" />
+  </head>
+  <body>
+    <header data-tauri-drag-region>
+      <div class="brand" data-tauri-drag-region>
+        <svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h4.1L12 12.4 16.9 3H21L12 18.6z" fill="#f2f2f2" /><rect x="10.6" y="19.6" width="2.8" height="2.8" fill="#ff3b30" /></svg>
+        <span data-tauri-drag-region data-t="setup">Velox Setup</span>
+      </div>
+      <button id="close" class="x" aria-label="Close">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+      </button>
+    </header>
+
+    <main>
+      <!-- Hero, shared by every screen -->
+      <section class="hero">
+        <svg class="mark" width="64" height="64" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h4.1L12 12.4 16.9 3H21L12 18.6z" fill="#f2f2f2" /><rect class="drop" x="10.6" y="19.6" width="2.8" height="2.8" fill="#ff3b30" /></svg>
+        <h1>Velox <span id="ver" class="ver"></span></h1>
+        <p class="tag" data-t="tagline">Fast downloads. Built in Rust.</p>
+      </section>
+
+      <!-- 1. Install -->
+      <section id="s-install" class="screen">
+        <div class="opts">
+          <label class="opt"><input type="checkbox" id="o-desktop" checked /><span class="tg"></span><span data-t="desktop">Desktop shortcut</span></label>
+          <label class="opt"><input type="checkbox" id="o-ext" checked /><span class="tg"></span><span data-t="extension">Prepare the browser extension</span></label>
+        </div>
+        <p class="where"><span data-t="location">Location</span> <code id="dir"></code></p>
+        <p id="note" class="note"></p>
+      </section>
+
+      <!-- 2. Progress -->
+      <section id="s-progress" class="screen" hidden>
+        <div class="bar"><i id="fill"></i></div>
+        <div class="status"><span id="step"></span><span id="pct" class="num">0%</span></div>
+      </section>
+
+      <!-- 3. Done -->
+      <section id="s-done" class="screen" hidden>
+        <p class="ok"><span class="check">✓</span><span data-t="ready">Velox is ready</span></p>
+        <div id="ext-help" class="card">
+          <b data-t="extTitle">Add the browser extension</b>
+          <ol>
+            <li data-t="ext1">Open chrome://extensions (brave://, edge://) and enable Developer mode</li>
+            <li data-t="ext2">Click “Load unpacked” and choose this folder:</li>
+          </ol>
+          <div class="path"><code id="extdir"></code><button id="copy" class="mini" data-t="copy">Copy</button><button id="openext" class="mini" data-t="open">Open</button></div>
+        </div>
+      </section>
+
+      <!-- 4. Uninstall -->
+      <section id="s-uninstall" class="screen" hidden>
+        <p class="lead" data-t="unTitle">Remove Velox from this computer?</p>
+        <label class="opt"><input type="checkbox" id="o-data" /><span class="tg"></span><span data-t="unData">Also delete settings and download history</span></label>
+        <p class="note" data-t="unKeep">Downloaded files are never touched.</p>
+      </section>
+
+      <section id="s-error" class="screen" hidden>
+        <p class="err" id="err"></p>
+      </section>
+    </main>
+
+    <footer>
+      <span id="foot" class="faint"></span>
+      <div class="btns">
+        <button id="secondary" class="btn ghost" hidden></button>
+        <button id="primary" class="btn primary"></button>
+      </div>
+    </footer>
+
+    <script src="setup.js"></script>
+  </body>
+</html>

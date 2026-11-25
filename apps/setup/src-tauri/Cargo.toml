@@ -1,0 +1,23 @@
+[package]
+name = "velox-setup"
+description = "Velox installer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+zstd = "0.13"
+
+[dependencies]
+tauri = { version = "2", features = ["custom-protocol"] }
+serde.workspace = true
+serde_json.workspace = true
+zstd = "0.13"
+dirs = "5"
+sys-locale = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+mslnk = "0.1"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/velox-core", "crates/velox-host", "apps/desktop/src-tauri"]
+members = ["crates/velox-core", "crates/velox-host", "apps/desktop/src-tauri", "apps/setup/src-tauri"]
 
 [workspace.package]
 version = "1.0.0"

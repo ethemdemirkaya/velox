@@ -62,7 +62,7 @@ jobs:
           releaseName: "Velox ${{ github.ref_name }}"
           releaseBody: |
             ### Install
-            * **Windows** – `Velox_*_x64-setup.exe`
+            * **Windows** – `Velox-Setup-*.exe` (recommended) or `Velox_*_x64-setup.exe` / `.msi`
             * **macOS** – `.dmg` (Apple Silicon: `aarch64`, Intel: `x64`)
             * **Linux** – `.AppImage` or `.deb`
 
@@ -72,6 +72,20 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           args: ${{ matrix.args }}
+
+      # Velox Setup: the custom dark installer (embeds the app built above).
+      - name: Build Velox Setup
+        if: matrix.platform == 'windows-latest'
+        run: cargo build --release -p velox-setup
+      - name: Upload Velox Setup
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          name="Velox-Setup-${GITHUB_REF_NAME#v}.exe"
+          cp target/release/velox-setup.exe "$name"
+          gh release upload "$GITHUB_REF_NAME" "$name" --clobber
 
   extension:
     runs-on: ubuntu-latest
