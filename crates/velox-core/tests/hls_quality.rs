@@ -213,3 +213,24 @@ async fn separate_audio_rendition_is_merged() {
     let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name()).collect();
     assert_eq!(leftovers.len(), 1, "temporary files left: {leftovers:?}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inspect_describes_streams_for_the_browser() {
+    let srv = serve().await;
+    let e = Engine::in_memory();
+    let master = e.inspect(request(&srv.master, None)).await;
+    assert!(master.ok && master.master);
+    assert_eq!(master.height, Some(1080));
+    assert_eq!(master.duration, Some(72.0));
+    assert_eq!(master.children.len(), 3);
+    let variant = srv.master.replace("master.m3u8", "v720/index.m3u8");
+    assert!(master.children.contains(&variant), "{:?}", master.children);
+
+    let v = e.inspect(request(&variant, None)).await;
+    assert!(v.ok && !v.master);
+    let v2 = e.inspect(request(&srv.master.replace("master.m3u8", "v360/index.m3u8"), None)).await;
+    assert_eq!(v.fingerprint, v2.fingerprint, "same timeline → same fingerprint");
+
+    let refused = e.inspect(AddRequest { url: srv.master.clone(), ..Default::default() }).await;
+    assert!(!refused.ok);
+}

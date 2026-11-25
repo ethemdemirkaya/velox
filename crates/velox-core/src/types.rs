@@ -183,3 +183,23 @@ pub struct ProbeInfo {
     /// Video sites: available qualities, best first.
     pub qualities: Vec<crate::site::QualityOption>,
 }
+
+/// What a captured stream is, so the browser can label it ("1080p · 39:47")
+/// and hide duplicates instead of showing raw playlist file names.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamInfo {
+    /// The URL answered with a playable playlist.
+    pub ok: bool,
+    /// HLS master playlist (several qualities / renditions).
+    pub master: bool,
+    /// Tallest video height offered.
+    pub height: Option<u32>,
+    /// Seconds, when the playlist is complete (VOD).
+    pub duration: Option<f64>,
+    pub qualities: Vec<crate::site::QualityOption>,
+    /// Variant and rendition playlists a master points to (absolute URLs).
+    pub children: Vec<String>,
+    /// Same value for playlists with the same content (other tokens / mirrors).
+    pub fingerprint: String,
+}

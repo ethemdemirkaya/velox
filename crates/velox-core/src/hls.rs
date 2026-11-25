@@ -77,6 +77,20 @@ pub(crate) async fn plan(ctx: &HlsCtx) -> Result<Plan, DlError> {
 /// Qualities offered by a master playlist, best first, with a size estimate
 /// (bandwidth × duration). Empty for plain media playlists.
 pub(crate) async fn qualities(client: &Client, url: &str, headers: &HeaderMap) -> Vec<crate::site::QualityOption> {
+    let q = inspect(client, url, headers).await.qualities;
+    if q.len() < 2 {
+        vec![]
+    } else {
+        q
+    }
+}
+
+fn media_duration(mp: &m3u8_rs::MediaPlaylist) -> Option<f64> {
+    mp.end_list.then(|| mp.segments.iter().map(|s| s.duration as f64).sum::<f64>()).filter(|d| *d > 0.0)
+}
+
+/// Look at a playlist without downloading the stream (a few KB).
+pub(crate) async fn inspect(client: &Client, url: &str, headers: &HeaderMap) -> crate::types::StreamInfo {
     let fetch = |u: String| {
         let req = client.get(u).headers(headers.clone()).timeout(Duration::from_secs(6));
         async move {
@@ -87,35 +101,52 @@ pub(crate) async fn qualities(client: &Client, url: &str, headers: &HeaderMap) -
             r.bytes().await.ok()
         }
     };
-    let Some(body) = fetch(url.to_string()).await else { return vec![] };
-    let Ok(Playlist::MasterPlaylist(m)) = m3u8_rs::parse_playlist_res(&body) else { return vec![] };
-    // Best variant per height.
-    let mut by_h: Vec<(u32, &m3u8_rs::VariantStream)> = Vec::new();
-    for v in m.variants.iter().filter(|v| !v.is_i_frame) {
-        let Some(h) = v.resolution.map(|r| r.height as u32) else { continue };
-        match by_h.iter_mut().find(|(x, _)| *x == h) {
-            Some(e) if e.1.bandwidth < v.bandwidth => e.1 = v,
-            Some(_) => {}
-            None => by_h.push((h, v)),
+    let mut info = crate::types::StreamInfo::default();
+    let Some(body) = fetch(url.to_string()).await else { return info };
+    match m3u8_rs::parse_playlist_res(&body) {
+        Ok(Playlist::MediaPlaylist(mp)) => {
+            info.ok = true;
+            info.duration = media_duration(&mp);
+            info.fingerprint = format!("m:{}:{:.0}", mp.segments.len(), info.duration.unwrap_or(0.0));
         }
+        Ok(Playlist::MasterPlaylist(m)) => {
+            info.ok = true;
+            info.master = true;
+            let variants: Vec<_> = m.variants.iter().filter(|v| !v.is_i_frame).collect();
+            info.children = variants.iter().map(|v| resolve(url, &v.uri)).chain(m.alternatives.iter().filter_map(|a| a.uri.as_ref().map(|u| resolve(url, u)))).collect();
+            // Best variant per height.
+            let mut by_h: Vec<(u32, &m3u8_rs::VariantStream)> = Vec::new();
+            for v in &variants {
+                let Some(h) = v.resolution.map(|r| r.height as u32) else { continue };
+                match by_h.iter_mut().find(|(x, _)| *x == h) {
+                    Some(e) if e.1.bandwidth < v.bandwidth => e.1 = v,
+                    Some(_) => {}
+                    None => by_h.push((h, v)),
+                }
+            }
+            by_h.sort_by_key(|(h, _)| std::cmp::Reverse(*h));
+            info.height = by_h.first().map(|(h, _)| *h);
+            // Duration from one media playlist (all variants share the timeline).
+            if let Some(v) = by_h.last().map(|(_, v)| *v).or(variants.first().copied()) {
+                if let Some(Ok(Playlist::MediaPlaylist(mp))) = fetch(resolve(url, &v.uri)).await.as_deref().map(m3u8_rs::parse_playlist_res) {
+                    info.duration = media_duration(&mp);
+                }
+            }
+            let duration = info.duration.unwrap_or(0.0);
+            info.qualities = by_h
+                .iter()
+                .map(|(h, v)| crate::site::QualityOption {
+                    id: h.to_string(),
+                    height: Some(*h),
+                    size: (duration > 0.0).then(|| (v.average_bandwidth.unwrap_or(v.bandwidth) as f64 / 8.0 * duration) as u64),
+                })
+                .collect();
+            let heights: Vec<String> = by_h.iter().map(|(h, _)| h.to_string()).collect();
+            info.fingerprint = format!("M:{}:{}:{:.0}", variants.len(), heights.join(","), duration);
+        }
+        Err(_) => {}
     }
-    if by_h.len() < 2 {
-        return vec![];
-    }
-    by_h.sort_by_key(|(h, _)| std::cmp::Reverse(*h));
-    // Duration from one media playlist (all variants share the timeline).
-    let media = fetch(resolve(url, &by_h[by_h.len() - 1].1.uri)).await;
-    let duration = match media.as_deref().map(m3u8_rs::parse_playlist_res) {
-        Some(Ok(Playlist::MediaPlaylist(mp))) if mp.end_list => mp.segments.iter().map(|s| s.duration as f64).sum::<f64>(),
-        _ => 0.0,
-    };
-    by_h.into_iter()
-        .map(|(h, v)| crate::site::QualityOption {
-            id: h.to_string(),
-            height: Some(h),
-            size: (duration > 0.0).then(|| (v.average_bandwidth.unwrap_or(v.bandwidth) as f64 / 8.0 * duration) as u64),
-        })
-        .collect()
+    info
 }
 
 #[derive(Clone)]

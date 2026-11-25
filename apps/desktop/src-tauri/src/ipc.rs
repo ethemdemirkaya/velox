@@ -81,6 +81,13 @@ async fn process(app: &AppHandle, line: &str) -> Value {
             }
             _ => json!({ "ok": false, "error": "missing url" }),
         },
+        "inspect" => match serde_json::from_value::<AddRequest>(msg.clone()) {
+            Ok(req) if !req.url.is_empty() => {
+                let info = state.engine.inspect(req).await;
+                json!({ "ok": true, "info": info })
+            }
+            _ => json!({ "ok": false, "error": "missing url" }),
+        },
         "prefetch" => {
             if let Some(url) = msg.get("url").and_then(Value::as_str) {
                 state.engine.prefetch(url);

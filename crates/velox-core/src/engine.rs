@@ -367,6 +367,13 @@ impl Engine {
         site::prefetch(url);
     }
 
+    /// Describe a captured HLS stream for the browser extension's menus.
+    pub async fn inspect(&self, req: AddRequest) -> StreamInfo {
+        let client = self.0.client.read().clone();
+        let headers = header_map(&req.referrer, &req.cookies, &req.user_agent, &req.headers);
+        hls::inspect(&client, &req.url, &headers).await
+    }
+
     /// Inspect a URL without adding it (used by the confirm dialog).
     pub async fn probe(&self, req: AddRequest) -> Result<ProbeInfo, String> {
         let r = self.resolve(&req).await?;

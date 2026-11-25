@@ -79,9 +79,9 @@ async function render() {
     el.className = "item";
     el.innerHTML = `<span class="k"></span><div class="n"><div class="f"></div><div class="s"></div></div><button class="btn sm"></button>`;
     el.querySelector(".k").textContent = m.kind === "site" ? (L === tr ? "VİDEO" : "VIDEO") : m.kind.toUpperCase();
-    el.querySelector(".f").textContent = m.kind === "site" ? m.title || name(m.url) : name(m.url);
+    el.querySelector(".f").textContent = m.kind === "site" ? m.title || name(m.url) : m.label || name(m.url);
     el.querySelector(".f").title = m.url;
-    el.querySelector(".s").textContent = m.kind === "site" ? new URL(m.url).hostname.replace(/^www\./, "") : [fmt(m.size), m.title].filter(Boolean).join(" · ");
+    el.querySelector(".s").textContent = m.kind === "site" ? new URL(m.url).hostname.replace(/^www\./, "") : m.detail ?? [fmt(m.size), m.title].filter(Boolean).join(" · ");
     const b = el.querySelector("button");
     b.textContent = L.dl;
     b.disabled = !s.connected;

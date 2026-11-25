@@ -304,10 +304,108 @@ function isAd(url) {
 }
 
 const RANK = { site: 0, hls: 1, dash: 2, http: 3 };
-/** Best candidates first: the page's video, streams (first seen = master
- *  playlist), then direct files by size. */
+const score = (m) => (m.dead ? 10 : 0) + (RANK[m.kind] ?? 9) - (m.info?.master ? 0.5 : 0);
+/** Best candidates first: the page's video, master playlists, other streams,
+ *  then direct files by size; streams Velox could not open go last. */
 function rank(list) {
-  return list.sort((a, b) => (RANK[a.kind] ?? 9) - (RANK[b.kind] ?? 9) || (a.kind === "http" ? (b.size || 0) - (a.size || 0) : a.ts - b.ts));
+  return list.sort((a, b) => score(a) - score(b) || (a.kind === "http" ? (b.size || 0) - (a.size || 0) : a.ts - b.ts));
+}
+
+// ── Human labels instead of "index.m3u8" / "nl.php" ─────────────────────────
+const TR = navigator.language.toLowerCase().startsWith("tr");
+const W = TR
+  ? { main: "Ana yayın", stream: "Yayın", qualities: "kalite", video: "Video", audio: "Ses", dash: "DASH yayını", dead: "açılamadı" }
+  : { main: "Main stream", stream: "Stream", qualities: "qualities", video: "Video", audio: "Audio", dash: "DASH stream", dead: "unavailable" };
+
+function fmtSize(n) {
+  if (!n) return "";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < 3) (n /= 1024), i++;
+  return `${n.toFixed(n >= 100 ? 0 : 1)} ${u[i]}`;
+}
+function fmtDur(s) {
+  if (!s) return "";
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+  return (h ? `${h}:${String(m).padStart(2, "0")}` : `${m}`) + `:${String(x).padStart(2, "0")}`;
+}
+function meaningfulName(url) {
+  let base = "";
+  try {
+    base = decodeURIComponent(new URL(url).pathname.split("/").pop() || "");
+  } catch {}
+  const stem = base.replace(/\.[a-z0-9]{2,4}$/i, "");
+  return /[a-z]{4,}/i.test(stem) && !/^(index|master|playlist|manifest|video|stream|chunklist|media|[a-z]{1,3})$/i.test(stem) && !/^[a-f0-9-]{16,}$/i.test(stem) ? base : "";
+}
+
+function describe(m) {
+  const host = (() => {
+    try {
+      return new URL(m.url).hostname.replace(/^www\./, "");
+    } catch {
+      return "";
+    }
+  })();
+  if (m.kind === "hls") {
+    const i = m.info;
+    const best = i?.qualities?.[0];
+    const label = [i?.master ? W.main : W.stream, i?.height ? `${i.height}p` : ""].filter(Boolean).join(" · ");
+    const detail = m.dead
+      ? [W.dead, host]
+      : [fmtDur(i?.duration), i?.qualities?.length > 1 ? `${i.qualities.length} ${W.qualities}` : "", best?.size ? "~" + fmtSize(best.size) : "", host];
+    return { label, detail: detail.filter(Boolean).join(" · ") };
+  }
+  if (m.kind === "dash") return { label: W.dash, detail: host };
+  if (m.kind === "http") {
+    const audio = (m.mime || "").startsWith("audio/") || /\.(mp3|m4a|flac|ogg|aac)(\?|$)/i.test(m.url);
+    return { label: meaningfulName(m.url) || (audio ? W.audio : W.video), detail: [fmtSize(m.size), host].filter(Boolean).join(" · ") };
+  }
+  return { label: m.title || host, detail: host };
+}
+
+// Ask Velox what each captured playlist is (a few KB, with the player's
+// headers): master or variant, height, duration, and a content fingerprint.
+async function inspectItem(tabId, item) {
+  if (item.kind !== "hls" || item.info || item.inspecting || !state.connected) return;
+  item.inspecting = true;
+  const cookies = await cookiesFor(item.url);
+  const r = await send(
+    {
+      type: "inspect",
+      url: item.url,
+      referrer: item.referer || (item.initiator ? item.initiator + "/" : null),
+      cookies: cookies || null,
+      userAgent: navigator.userAgent,
+      headers: item.origin ? [["Origin", item.origin]] : [],
+    },
+    10000,
+  );
+  item.inspecting = false;
+  if (!r?.ok || !r.info) return;
+  item.info = r.info;
+  item.dead = !r.info.ok;
+  refine(tabId);
+}
+
+/** Hide variant playlists of a known master and repeats of the same stream
+ *  (same content behind another token or mirror). */
+function refine(tabId) {
+  const list = media.get(tabId);
+  if (!list) return;
+  const children = new Set(list.flatMap((m) => m.info?.children || []).map((u) => u.split("#")[0]));
+  const seen = new Set();
+  rank(list);
+  for (const m of list) {
+    m.hidden = m.kind === "hls" && !m.info?.master && children.has(m.key);
+    const fp = m.info?.ok && m.info.fingerprint;
+    if (!m.hidden && fp && !/^m:0:/.test(fp)) {
+      if (seen.has(fp)) m.hidden = true;
+      else seen.add(fp);
+    }
+    Object.assign(m, describe(m));
+  }
+  persistMedia();
 }
 
 let saveTimer = 0;
@@ -364,11 +462,13 @@ chrome.webRequest.onHeadersReceived.addListener(
       initiator: d.initiator || "",
     };
     list = rank([item, ...list]).slice(0, 30);
+    Object.assign(item, describe(item));
     media.set(d.tabId, list);
     chrome.tabs.get(d.tabId).then((tab) => {
       for (const m of list) if (!m.title) m.title = tab.title;
       persistMedia();
     }, () => {});
+    inspectItem(d.tabId, item);
     updateBadge(d.tabId);
   },
   { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] },
@@ -443,7 +543,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         if (tab && isSiteUrl(tab.url) && !(media.get(tabId) || []).some((m) => m.kind === "site" && m.url === tab.url)) {
           syncSiteItem(tabId, tab.url, tab.title);
         }
-        const items = media.get(tabId) || [];
+        const all = media.get(tabId) || [];
+        // Streams captured before Velox was reachable get looked at now.
+        for (const m of all) if (m.kind === "hls" && !m.info) inspectItem(tabId, m);
+        const items = all.filter((m) => !m.hidden);
         // The pill in an embedded player asks for its own streams first.
         const frameId = msg.tabId == null ? sender.frameId : undefined;
         const mine = frameId ? items.filter((m) => m.frameId === frameId || m.kind === "site") : [];

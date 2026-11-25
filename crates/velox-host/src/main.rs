@@ -84,8 +84,8 @@ fn connect_or_launch(launch: bool) -> io::Result<Stream> {
 
 fn forward(msg: &Value) -> Value {
     let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
-    // A ping must not spawn the app – the popup just wants to know the state.
-    let launch = kind != "ping";
+    // Background lookups must not spawn the app – only user actions do.
+    let launch = !matches!(kind, "ping" | "inspect" | "prefetch");
     let stream = match connect_or_launch(launch) {
         Ok(s) => s,
         Err(e) => {

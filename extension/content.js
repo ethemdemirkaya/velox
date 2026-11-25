@@ -366,8 +366,9 @@
       try {
         name = decodeURIComponent(new URL(m.url).pathname.split("/").pop() || m.url);
       } catch {}
-      el.querySelector(".n").textContent = name;
-      el.querySelector(".s").textContent = fmt(m.size);
+      el.querySelector(".n").textContent = m.label || name;
+      el.querySelector(".n").title = m.url;
+      el.querySelector(".s").textContent = m.detail ?? fmt(m.size);
       el.addEventListener("click", () => send(m));
       menu.appendChild(el);
     }
