@@ -276,7 +276,8 @@ pub(crate) async fn download(ctx: &SiteCtx, r: &Resolved, base: &std::path::Path
         let done: u64 = own.iter().map(|s| s.written - s.start).sum();
         let sub = Arc::new(Live::new(done, size, &own, 0));
         let hctx = Arc::new(http::Ctx {
-            client: ctx.client.clone(),
+            clients: vec![ctx.client.clone()],
+            first: parking_lot::Mutex::new(None),
             url: f.url.clone(),
             headers: f.headers.clone(),
             live: sub.clone(),
@@ -330,7 +331,7 @@ fn mirror_main(main: &Live, sub: &Live, off: u64) {
     main.active.store(sub.active.load(Ordering::Relaxed), Ordering::Relaxed);
     let mut segs: Vec<http::SegState> = main.segments.lock().iter().filter(|s| s.end <= off).copied().collect();
     if off > 0 && segs.is_empty() {
-        segs.push(http::SegState { start: 0, end: off, reserved: off, written: off, active: false });
+        segs.push(http::SegState { start: 0, end: off, reserved: off, written: off, ..Default::default() });
     }
     segs.extend(sub.segments.lock().iter().map(|s| http::SegState {
         start: s.start + off,
@@ -338,6 +339,7 @@ fn mirror_main(main: &Live, sub: &Live, off: u64) {
         reserved: s.reserved + off,
         written: s.written + off,
         active: s.active,
+        ..Default::default()
     }));
     *main.segments.lock() = segs;
 }

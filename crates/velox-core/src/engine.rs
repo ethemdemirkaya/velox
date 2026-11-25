@@ -78,6 +78,10 @@ struct Inner {
     global: Arc<RateLimiter>,
     client: RwLock<Client>,
     had_work: AtomicBool,
+    /// Unread probe responses by URL, reused as the first connection.
+    warm: Mutex<HashMap<String, (Instant, reqwest::Response)>>,
+    /// Per-server-IP clients by host (multi-IP spreading).
+    ip_clients: Mutex<HashMap<String, (Instant, Vec<Client>)>>,
 }
 
 /// Cheap to clone handle to the download engine.
@@ -98,6 +102,11 @@ struct Resolved {
 }
 
 fn build_client(s: &Settings) -> Client {
+    build_client_pinned(s, None)
+}
+
+/// Like [`build_client`], optionally pinning `host` to one server address.
+fn build_client_pinned(s: &Settings, pin: Option<(&str, std::net::SocketAddr)>) -> Client {
     let mut h = HeaderMap::new();
     h.insert(ACCEPT, HeaderValue::from_static("*/*"));
     // Never let a server compress: ranges must map 1:1 to file bytes.
@@ -122,6 +131,9 @@ fn build_client(s: &Settings) -> Client {
             Ok(p) => b = b.proxy(p),
             Err(e) => tracing::warn!("invalid proxy {}: {e}", s.proxy),
         }
+    }
+    if let Some((host, addr)) = pin {
+        b = b.resolve(host, addr);
     }
     b.build().expect("http client")
 }
@@ -212,6 +224,8 @@ impl Engine {
             jobs: Mutex::new(jobs),
             events,
             had_work: AtomicBool::new(false),
+            warm: Mutex::new(HashMap::new()),
+            ip_clients: Mutex::new(HashMap::new()),
         });
         let engine = Engine(inner);
         tokio::spawn(engine.clone().ticker());
@@ -236,6 +250,7 @@ impl Engine {
         let old = std::mem::replace(&mut *self.0.settings.write(), s.clone());
         if old.proxy != s.proxy || old.user_agent != s.user_agent {
             *self.0.client.write() = build_client(&s);
+            self.0.ip_clients.lock().clear();
         }
         self.0.global.set_rate(s.speed_limit);
         self.0.store.save_settings(&s);
@@ -309,7 +324,12 @@ impl Engine {
         }
         let client = self.0.client.read().clone();
         let headers = header_map(&req.referrer, &req.cookies, &req.user_agent, &req.headers);
-        let p = http::probe(&client, &url, &headers).await.map_err(|e| e.to_string())?;
+        let mut p = http::probe(&client, &url, &headers).await.map_err(|e| e.to_string())?;
+        if let Some(resp) = p.response.take() {
+            let mut warm = self.0.warm.lock();
+            warm.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(15));
+            warm.insert(url.clone(), (Instant::now(), resp));
+        }
         if p.kind != Kind::Http {
             return Ok(Resolved {
                 file_name: stream_name(&p.final_url, req.file_name.as_deref()),
@@ -453,8 +473,14 @@ impl Engine {
         let part = util::part_path(&path);
         match rec.kind {
             Kind::Http => {
+                let first = match self.0.warm.lock().remove(&rec.url) {
+                    Some((t, r)) if t.elapsed() < Duration::from_secs(15) && rec.downloaded == 0 => Some(r),
+                    _ => None,
+                };
+                let clients = self.clients_for(&rec.url, client).await;
                 let ctx = Arc::new(http::Ctx {
-                    client,
+                    clients,
+                    first: Mutex::new(first),
                     url: rec.url.clone(),
                     headers,
                     live,
@@ -579,6 +605,43 @@ impl Engine {
         let st = tools::status();
         self.emit(EngineEvent::Tools(st.clone()));
         Ok(st)
+    }
+
+    /// CDNs answer with several server IPs. Spreading connections across them
+    /// lifts per-server throughput caps. Falls back to the shared client.
+    async fn clients_for(&self, url: &str, base: Client) -> Vec<Client> {
+        let s = self.settings();
+        if !s.proxy.trim().is_empty() {
+            return vec![base];
+        }
+        let Ok(u) = url::Url::parse(url) else { return vec![base] };
+        let Some(host) = u.host_str().map(str::to_string) else { return vec![base] };
+        if host.parse::<std::net::IpAddr>().is_ok() || host == "localhost" {
+            return vec![base];
+        }
+        if let Some((t, c)) = self.0.ip_clients.lock().get(&host) {
+            if t.elapsed() < Duration::from_secs(300) {
+                return c.clone();
+            }
+        }
+        let port = u.port_or_known_default().unwrap_or(443);
+        let addrs: Vec<std::net::SocketAddr> =
+            match tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((host.as_str(), port))).await {
+                Ok(Ok(a)) => a.collect(),
+                _ => return vec![base],
+            };
+        // Prefer IPv4 when available (IPv6 may be advertised but unroutable).
+        let v4: Vec<_> = addrs.iter().copied().filter(|a| a.is_ipv4()).collect();
+        let mut ips = if v4.is_empty() { addrs } else { v4 };
+        ips.dedup();
+        ips.truncate(4);
+        if ips.len() < 2 {
+            return vec![base];
+        }
+        let clients: Vec<Client> = ips.iter().map(|a| build_client_pinned(&s, Some((&host, *a)))).collect();
+        tracing::debug!("{host}: spreading over {} server IPs", clients.len());
+        self.0.ip_clients.lock().insert(host, (Instant::now(), clients.clone()));
+        clients
     }
 
     fn set_status(&self, id: &str, status: Status) {

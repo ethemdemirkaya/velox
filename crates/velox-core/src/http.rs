@@ -27,12 +27,20 @@ use crate::util;
 const MIN_SPLIT: u64 = 1024 * 1024;
 /// Initial segments are never smaller than this.
 const MIN_SEGMENT: u64 = 1024 * 1024;
-/// Bytes buffered per connection before a positional write.
-const WRITE_BUF: usize = 1024 * 1024;
+/// Bytes buffered per connection before a positional write (fewer syscalls
+/// on gigabit lines).
+const WRITE_BUF: usize = 2 * 1024 * 1024;
 const MAX_RETRIES: u32 = 12;
-const RAMP_START: u16 = 2;
-const RAMP_STEP: u16 = 2;
-const RAMP_EVERY: Duration = Duration::from_millis(150);
+/// Connection ramp: start wide, grow fast. Servers that dislike it make the
+/// extra workers yield (adaptive limit below).
+const RAMP_START: u16 = 8;
+const RAMP_STEP: u16 = 4;
+const RAMP_EVERY: Duration = Duration::from_millis(100);
+/// A connection slower than median/4 for this many 1-second ticks gets
+/// replaced by a fresh one (often landing on a faster CDN node).
+const SLOW_TICKS: u8 = 3;
+/// Only replace slow connections that still have this much left to fetch.
+const SLOW_MIN_REMAINING: u64 = 4 * 1024 * 1024;
 pub const UNKNOWN: u64 = u64::MAX;
 
 #[derive(Debug, thiserror::Error, Clone)]
@@ -73,13 +81,19 @@ impl From<reqwest::Error> for DlError {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SegState {
     pub start: u64,
     pub end: u64,
     pub reserved: u64,
     pub written: u64,
     pub active: bool,
+    /// Set by the manager: drop this connection and reconnect.
+    pub restart: bool,
+    /// `reserved` at the previous speed tick.
+    pub last: u64,
+    /// Consecutive ticks this connection was a straggler.
+    pub slow: u8,
 }
 
 /// Live state shared between the engine (UI ticker) and the download task.
@@ -104,7 +118,7 @@ impl Live {
             active: AtomicU16::new(0),
             segments: Mutex::new(
                 segs.iter()
-                    .map(|s| SegState { start: s.start, end: s.end, reserved: s.written, written: s.written, active: false })
+                    .map(|s| SegState { start: s.start, end: s.end, reserved: s.written, written: s.written, ..Default::default() })
                     .collect(),
             ),
             limiter: RateLimiter::new(limit),
@@ -128,7 +142,12 @@ impl Live {
 }
 
 pub(crate) struct Ctx {
-    pub client: Client,
+    /// One client per server IP (CDNs return several); connections are
+    /// spread across them so one node's per-host cap doesn't bound us.
+    pub clients: Vec<Client>,
+    /// The probe's still-open response (`Range: bytes=0-`), reused as the
+    /// first connection – saves a full TCP+TLS round trip.
+    pub first: Mutex<Option<reqwest::Response>>,
     pub url: String,
     pub headers: HeaderMap,
     pub live: Arc<Live>,
@@ -149,6 +168,8 @@ pub(crate) struct Probed {
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub kind: Kind,
+    /// The unread probe response, kept so the download can continue on it.
+    pub response: Option<reqwest::Response>,
 }
 
 fn header_str(h: &HeaderMap, k: impl reqwest::header::AsHeaderName) -> Option<String> {
@@ -193,8 +214,8 @@ pub(crate) async fn probe(client: &Client, url: &str, headers: &HeaderMap) -> Re
     }
     let etag = header_str(h, ETAG).filter(|e| !e.starts_with("W/"));
     let last_modified = header_str(h, LAST_MODIFIED);
-    drop(resp); // closes the connection, we only needed the headers
     Ok(Probed {
+        response: Some(resp),
         final_url,
         file_name: util::sanitize(&name),
         size,
@@ -269,10 +290,10 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
             *segs = match total {
                 Some(t) if segmented => plan(t, ctx.max_conns)
                     .into_iter()
-                    .map(|s| SegState { start: s.start, end: s.end, reserved: s.start, written: s.start, active: false })
+                    .map(|s| SegState { start: s.start, end: s.end, reserved: s.start, written: s.start, ..Default::default() })
                     .collect(),
-                Some(t) => vec![SegState { start: 0, end: t, reserved: 0, written: 0, active: false }],
-                None => vec![SegState { start: 0, end: UNKNOWN, reserved: 0, written: 0, active: false }],
+                Some(t) => vec![SegState { start: 0, end: t, ..Default::default() }],
+                None => vec![SegState { start: 0, end: UNKNOWN, ..Default::default() }],
             };
             ctx.live.downloaded.store(0, Ordering::Relaxed);
         }
@@ -328,6 +349,8 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
     refill(&mut set, ramp);
     let mut tick = tokio::time::interval(RAMP_EVERY);
     tick.tick().await;
+    let mut speed_tick = tokio::time::interval(Duration::from_secs(1));
+    speed_tick.tick().await;
 
     let mut first_err: Option<DlError> = None;
     loop {
@@ -361,6 +384,9 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
                     refill(&mut set, ramp);
                 }
             }
+            _ = speed_tick.tick(), if segmented && first_err.is_none() => {
+                flag_stragglers(&ctx.live);
+            }
         }
     }
 
@@ -390,6 +416,40 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
     Ok(size)
 }
 
+/// Mark connections that lag far behind the median for replacement.
+fn flag_stragglers(live: &Live) {
+    let mut segs = live.segments.lock();
+    let mut deltas: Vec<u64> = Vec::new();
+    for s in segs.iter_mut().filter(|s| s.active) {
+        deltas.push(s.reserved.saturating_sub(s.last));
+    }
+    if deltas.len() < 3 {
+        for s in segs.iter_mut() {
+            s.last = s.reserved;
+        }
+        return;
+    }
+    deltas.sort_unstable();
+    let median = deltas[deltas.len() / 2];
+    for s in segs.iter_mut() {
+        let delta = s.reserved.saturating_sub(s.last);
+        s.last = s.reserved;
+        if !s.active || s.end == UNKNOWN || s.end.saturating_sub(s.reserved) < SLOW_MIN_REMAINING || median < 256 * 1024 {
+            s.slow = 0;
+            continue;
+        }
+        if delta * 4 < median {
+            s.slow += 1;
+            if s.slow >= SLOW_TICKS {
+                s.slow = 0;
+                s.restart = true;
+            }
+        } else {
+            s.slow = 0;
+        }
+    }
+}
+
 /// Halve the segment with most remaining bytes. Returns the new segment index.
 fn steal(live: &Live) -> Option<usize> {
     let mut segs = live.segments.lock();
@@ -409,7 +469,7 @@ fn steal(live: &Live) -> Option<usize> {
         return None;
     }
     segs[idx].end = mid;
-    segs.push(SegState { start: mid, end: s.end, reserved: mid, written: mid, active: false });
+    segs.push(SegState { start: mid, end: s.end, reserved: mid, written: mid, last: mid, ..Default::default() });
     Some(segs.len() - 1)
 }
 
@@ -436,6 +496,7 @@ pub(crate) enum WorkerEnd {
 
 async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &CancellationToken) -> Result<WorkerEnd, DlError> {
     let mut attempt = 0u32;
+    let mut rotation = 0usize;
     let mut buf: Vec<u8> = Vec::with_capacity(WRITE_BUF + 64 * 1024);
     loop {
         // (Re)start from the committed position.
@@ -448,8 +509,11 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
         if from >= end {
             return Ok(WorkerEnd::Done);
         }
-        let mut req = ctx.client.get(&ctx.url).headers(ctx.headers.clone());
+        let client = &ctx.clients[(idx + rotation) % ctx.clients.len()];
+        let mut req = client.get(&ctx.url).headers(ctx.headers.clone());
         let ranged = ctx.resumable;
+        // The probe connection is already streaming byte 0 onwards.
+        let reuse = if from == 0 { ctx.first.lock().take() } else { None };
         if ranged {
             let range = if end == UNKNOWN { format!("bytes={from}-") } else { format!("bytes={from}-{}", end - 1) };
             req = req.header(RANGE, range);
@@ -459,10 +523,14 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
                 }
             }
         }
-        let resp = tokio::select! {
-            _ = cancel.cancelled() => return Err(DlError::Cancelled),
-            r = req.send() => r,
+        let resp = match reuse {
+            Some(r) => Ok(r),
+            None => tokio::select! {
+                _ = cancel.cancelled() => return Err(DlError::Cancelled),
+                r = req.send() => r,
+            },
         };
+        let mut reconnect = false;
         let outcome: Result<bool, DlError> = async {
             let resp = resp?;
             let st = resp.status();
@@ -484,6 +552,15 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
                         return Err(DlError::Cancelled);
                     }
                     n = stream.next() => n,
+                    // Wake up now and then so a stalled socket can be replaced.
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        if std::mem::take(&mut ctx.live.segments.lock()[idx].restart) {
+                            flush_commit(ctx, idx, file, &mut buf, buf_off).await?;
+                            reconnect = true;
+                            return Ok(false);
+                        }
+                        continue;
+                    }
                 };
                 let chunk = match next {
                     Some(Ok(c)) => c,
@@ -503,12 +580,12 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
                 };
                 ctx.global.acquire(chunk.len()).await;
                 ctx.live.limiter.acquire(chunk.len()).await;
-                let (allowed, reached_end) = {
+                let (allowed, reached_end, restart) = {
                     let mut segs = ctx.live.segments.lock();
                     let s = &mut segs[idx];
                     let allowed = (chunk.len() as u64).min(s.end.saturating_sub(s.reserved)) as usize;
                     s.reserved += allowed as u64;
-                    (allowed, s.reserved >= s.end)
+                    (allowed, s.reserved >= s.end, if s.reserved >= s.end { false } else { std::mem::take(&mut s.restart) })
                 };
                 buf.extend_from_slice(&chunk[..allowed]);
                 ctx.live.downloaded.fetch_add(allowed as u64, Ordering::Relaxed);
@@ -520,6 +597,11 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
                 }
                 if reached_end {
                     return Ok(true);
+                }
+                if restart {
+                    flush_commit(ctx, idx, file, &mut buf, buf_off).await?;
+                    reconnect = true;
+                    return Ok(false);
                 }
             }
         }
@@ -536,6 +618,12 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
         // Other connections are alive, so this failure most likely means the
         // server caps connections per client: step aside instead of failing.
         let others = ctx.live.active.load(Ordering::Relaxed) > 1;
+        if reconnect {
+            // Straggler: reconnect right away, on the next server IP.
+            rotation += 1;
+            tracing::debug!("segment {idx}: replacing slow connection");
+            continue;
+        }
         match outcome {
             Ok(true) => return Ok(WorkerEnd::Done),
             Ok(false) => {} // premature EOF -> retry
@@ -556,6 +644,7 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
             }
         }
         attempt += 1;
+        rotation += 1;
         let backoff = Duration::from_millis((400u64 << attempt.min(5)).min(10_000));
         tokio::select! {
             _ = cancel.cancelled() => return Err(DlError::Cancelled),
