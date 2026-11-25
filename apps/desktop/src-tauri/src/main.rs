@@ -106,6 +106,16 @@ pub fn open_progress_window(app: &AppHandle, id: &str) {
 }
 
 /// A download handed to us by the browser extension.
+/// Opt-in diagnostics: set VELOX_LOG=1 to append to %TEMP%elox.log.
+pub fn dlog(msg: impl AsRef<str>) {
+    if std::env::var_os("VELOX_LOG").is_some() {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("velox.log")) {
+            let _ = writeln!(f, "{:?} {}", std::time::SystemTime::now(), msg.as_ref());
+        }
+    }
+}
+
 const CONFIRM_POOL: &str = "confirm-pool";
 const CONFIRM_W: f64 = 560.0;
 const CONFIRM_H: f64 = 456.0;
@@ -113,6 +123,7 @@ const CONFIRM_H: f64 = 456.0;
 /// Build the confirm window ahead of time (hidden) so a captured download
 /// pops up instantly instead of waiting for a WebView to boot.
 fn prewarm_confirm(app: &AppHandle) {
+    dlog("prewarm_confirm");
     if app.get_webview_window(CONFIRM_POOL).is_some() {
         return;
     }
@@ -140,13 +151,16 @@ pub async fn capture(app: &AppHandle, req: AddRequest, silent: bool) {
         let token = uuid::Uuid::new_v4().simple().to_string();
         state.pending.lock().insert(token.clone(), req);
         // Fast path: reuse the pre-built window.
-        if let Some(w) = app.get_webview_window(CONFIRM_POOL) {
+        let pool = app.get_webview_window(CONFIRM_POOL);
+        dlog(format!("capture {token}: pool={} busy={}", pool.is_some(), state.confirm_busy.load(std::sync::atomic::Ordering::SeqCst)));
+        if let Some(w) = pool {
             if !state.confirm_busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                let _ = w.emit("confirm-load", token.clone());
-                let _ = w.center();
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
+                let r1 = w.emit("confirm-load", token.clone());
+                let r2 = w.center();
+                let r3 = w.show();
+                let r4 = w.unminimize();
+                let r5 = w.set_focus();
+                dlog(format!("pool shown: emit={r1:?} center={r2:?} show={r3:?} unmin={r4:?} focus={r5:?} visible={:?}", w.is_visible()));
                 return;
             }
         }
@@ -163,6 +177,7 @@ pub async fn capture(app: &AppHandle, req: AddRequest, silent: bool) {
             .focused(true)
             .background_color(tauri::window::Color(10, 10, 10, 255))
             .build();
+        dlog(format!("fallback window: {:?}", res.as_ref().map(|_| ())));
         if let Err(e) = res {
             tracing::error!("confirm window: {e}");
         }
@@ -403,6 +418,7 @@ async fn show_progress(app: AppHandle, id: String) -> R<()> {
 /// waits for the next download, one-off windows close.
 #[tauri::command]
 async fn confirm_done(window: tauri::WebviewWindow, s: State<'_, AppState>) -> R<()> {
+    dlog(format!("confirm_done from {}", window.label()));
     if window.label() == CONFIRM_POOL {
         let _ = window.hide();
         s.confirm_busy.store(false, std::sync::atomic::Ordering::SeqCst);
