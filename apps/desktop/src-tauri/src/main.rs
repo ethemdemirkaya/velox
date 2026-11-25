@@ -314,8 +314,20 @@ async fn open_folder(app: AppHandle, path: String) -> R<()> {
 }
 
 #[tauri::command]
-async fn pick_folder(app: AppHandle) -> R<Option<String>> {
-    Ok(app.dialog().file().blocking_pick_folder().map(|p| p.to_string()))
+async fn pick_folder(app: AppHandle, window: tauri::WebviewWindow) -> R<Option<String>> {
+    // The confirm / progress windows are always-on-top: parent the dialog to
+    // the calling window (modal, so Windows keeps it in front) and drop
+    // always-on-top while it is open.
+    let on_top = window.is_always_on_top().unwrap_or(false);
+    if on_top {
+        let _ = window.set_always_on_top(false);
+    }
+    let picked = app.dialog().file().set_parent(&window).blocking_pick_folder().map(|p| p.to_string());
+    if on_top {
+        let _ = window.set_always_on_top(true);
+        let _ = window.set_focus();
+    }
+    Ok(picked)
 }
 
 #[tauri::command]
