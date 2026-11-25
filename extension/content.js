@@ -304,6 +304,8 @@
         ensure();
         mount();
         current = v;
+        const site = t.find((m) => m.kind === "site");
+        if (site) chrome.runtime.sendMessage({ type: "prefetch", url: site.url }).catch(() => {});
         menu.classList.remove("open");
         host.style.display = "block";
       }

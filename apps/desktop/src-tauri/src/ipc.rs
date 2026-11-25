@@ -81,6 +81,12 @@ async fn process(app: &AppHandle, line: &str) -> Value {
             }
             _ => json!({ "ok": false, "error": "missing url" }),
         },
+        "prefetch" => {
+            if let Some(url) = msg.get("url").and_then(Value::as_str) {
+                state.engine.prefetch(url);
+            }
+            json!({ "ok": true })
+        }
         "show" => {
             crate::show_main(app);
             json!({ "ok": true })

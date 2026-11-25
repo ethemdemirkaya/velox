@@ -109,18 +109,21 @@ fn forward(msg: &Value) -> Value {
 }
 
 fn main() {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut input = stdin.lock();
-    let mut output = stdout.lock();
+    // The extension keeps one port open; requests are handled concurrently so
+    // a slow one (launching the app, resolving a video) never blocks pings.
+    let out = std::sync::Arc::new(std::sync::Mutex::new(io::stdout()));
+    let mut input = io::stdin().lock();
     while let Ok(Some(msg)) = read_message(&mut input) {
-        let mut resp = forward(&msg);
-        if let Some(id) = msg.get("requestId") {
-            resp["requestId"] = id.clone();
-        }
-        if write_message(&mut output, &resp).is_err() {
-            break;
-        }
+        let out = out.clone();
+        std::thread::spawn(move || {
+            let mut resp = forward(&msg);
+            if let Some(id) = msg.get("requestId") {
+                resp["requestId"] = id.clone();
+            }
+            if let Ok(mut o) = out.lock() {
+                let _ = write_message(&mut *o, &resp);
+            }
+        });
     }
 }
 

@@ -11,6 +11,7 @@
   import Toasts from "./components/Toasts.svelte";
   import RemoveDialog from "./components/RemoveDialog.svelte";
   import ConfirmView from "./components/ConfirmView.svelte";
+  import ConfirmPool from "./components/ConfirmPool.svelte";
   import ProgressView from "./components/ProgressView.svelte";
   import { api } from "./lib/api";
 
@@ -108,7 +109,9 @@
 
 <svelte:window onkeydown={onKey} />
 
-{#if confirmToken}
+{#if confirmToken === "pool"}
+  <ConfirmPool />
+{:else if confirmToken}
   <ConfirmView token={confirmToken} />
 {:else if progressId}
   <ProgressView id={progressId} />

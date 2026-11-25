@@ -24,17 +24,64 @@ const media = new Map();
 
 // ─────────────────────────── native messaging ───────────────────────────
 
-function send(msg) {
-  return new Promise((resolve) => {
-    try {
-      chrome.runtime.sendNativeMessage(HOST, msg, (resp) => {
-        if (chrome.runtime.lastError) resolve({ ok: false, error: chrome.runtime.lastError.message });
-        else resolve(resp ?? { ok: false, error: "empty response" });
-      });
-    } catch (e) {
-      resolve({ ok: false, error: String(e) });
+// One long-lived native port instead of spawning velox-host per message:
+// messages go out instantly and the open port keeps the worker alive.
+let port = null;
+let seq = 0;
+const waiting = new Map();
+
+function openPort() {
+  if (port) return port;
+  try {
+    port = chrome.runtime.connectNative(HOST);
+  } catch (e) {
+    port = null;
+    return null;
+  }
+  port.onMessage.addListener((m) => {
+    const done = waiting.get(m?.requestId);
+    if (done) {
+      waiting.delete(m.requestId);
+      done(m);
     }
   });
+  port.onDisconnect.addListener(() => {
+    const error = chrome.runtime.lastError?.message || "disconnected";
+    port = null;
+    for (const done of waiting.values()) done({ ok: false, error });
+    waiting.clear();
+  });
+  return port;
+}
+
+function send(msg, timeout = msg.type === "ping" ? 3000 : 20000) {
+  return new Promise((resolve) => {
+    const p = openPort();
+    if (!p) return resolve({ ok: false, error: "native host unavailable" });
+    const id = ++seq;
+    waiting.set(id, resolve);
+    try {
+      p.postMessage({ ...msg, requestId: id });
+    } catch (e) {
+      waiting.delete(id);
+      port = null;
+      return resolve({ ok: false, error: String(e) });
+    }
+    setTimeout(() => {
+      if (waiting.delete(id)) resolve({ ok: false, error: "timeout" });
+    }, timeout);
+  });
+}
+
+// Video pages are resolved in the background as soon as they open, so the
+// download dialog has title, size and qualities the moment you click.
+const prefetched = new Map();
+function prefetch(url) {
+  if (!url || !state.connected) return;
+  const last = prefetched.get(url);
+  if (last && Date.now() - last < 9 * 60_000) return;
+  prefetched.set(url, Date.now());
+  send({ type: "prefetch", url }, 3000);
 }
 
 async function ping(force = false) {
@@ -200,6 +247,7 @@ function syncSiteItem(tabId, url, title) {
   let list = (media.get(tabId) || []).filter((m) => m.kind !== "site");
   if (url && isSiteUrl(url)) {
     list = [{ key: "site:" + url, url, kind: "site", title: (title || "").replace(/ - YouTube$/, ""), size: 0, ts: Date.now() }, ...list];
+    prefetch(url);
   }
   media.set(tabId, list);
   persistMedia();
@@ -286,21 +334,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 chrome.tabs.onActivated.addListener(({ tabId }) => updateBadge(tabId));
 
+// No counters on the toolbar icon – the popup lists what was found.
 function updateBadge(tabId) {
-  const apply = (id) => {
-    if (id == null) return;
-    if (!state.connected && state.lastPing) {
-      chrome.action.setBadgeText({ tabId: id, text: "!" });
-      chrome.action.setBadgeBackgroundColor({ tabId: id, color: "#3a3a3a" });
-      return;
-    }
-    const n = media.get(id)?.length || 0;
-    chrome.action.setBadgeText({ tabId: id, text: n ? String(n) : "" });
-    chrome.action.setBadgeBackgroundColor({ tabId: id, color: "#FF3B30" });
-    chrome.action.setBadgeTextColor?.({ tabId: id, color: "#FFFFFF" });
-  };
-  if (tabId != null) apply(tabId);
-  else chrome.tabs.query({ active: true }).then((tabs) => tabs.forEach((t) => apply(t.id)));
+  if (tabId != null) chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
+  else chrome.action.setBadgeText({ text: "" }).catch(() => {});
 }
 
 // ─────────────────────────── context menus ───────────────────────────
@@ -323,8 +360,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
 
 function notifyError(msg) {
   console.warn("[Velox]", msg);
-  chrome.action.setBadgeText({ text: "!" });
-  chrome.action.setBadgeBackgroundColor({ color: "#FF3B30" });
+
 }
 
 // ─────────────────────────── messages from popup / content ───────────────────────────
@@ -361,6 +397,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         reply(await handoff({ url: msg.url, fileName: msg.fileName, referrer, kind: msg.kind, size: msg.size, silent: msg.silent }));
         break;
       }
+      case "prefetch":
+        prefetch(msg.url);
+        reply({ ok: true });
+        break;
       case "show":
         reply(await send({ type: "show" }));
         break;

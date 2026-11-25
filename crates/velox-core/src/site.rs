@@ -164,13 +164,74 @@ fn size_of(v: &Value) -> Option<u64> {
     v.get("filesize").and_then(Value::as_u64).or_else(|| v.get("filesize_approx").and_then(Value::as_f64).map(|f| f as u64))
 }
 
-pub(crate) async fn resolve(url: &str, quality: Option<&str>) -> Result<Resolved, String> {
-    let key = format!("{url}#{}", quality.unwrap_or("best"));
-    if let Some((t, r)) = CACHE.lock().get_or_insert_with(HashMap::new).get(&key) {
-        if t.elapsed() < Duration::from_secs(600) {
-            return Ok(r.clone());
+/// Full yt-dlp JSON per page URL (all formats) – lets other qualities be
+/// picked locally without running yt-dlp again.
+type RawMap = HashMap<String, (Instant, Arc<Value>)>;
+static RAW: Mutex<Option<RawMap>> = Mutex::new(None);
+type Shared = Arc<tokio::sync::OnceCell<Result<Resolved, String>>>;
+/// In-flight resolves: a prefetch and a click for the same page share one run.
+static INFLIGHT: Mutex<Option<HashMap<String, Shared>>> = Mutex::new(None);
+const TTL: Duration = Duration::from_secs(600);
+
+fn finish(v: &Value, formats: Vec<Format>, exts: &[&str]) -> Result<Resolved, String> {
+    if formats.is_empty() {
+        return Err("no downloadable format".into());
+    }
+    let title = v.get("title").and_then(Value::as_str).unwrap_or("video").to_string();
+    let ext = if formats.len() > 1 {
+        if exts.iter().all(|e| matches!(*e, "mp4" | "m4a")) {
+            "mp4".to_string()
+        } else {
+            "mkv".to_string()
+        }
+    } else {
+        exts.first().copied().unwrap_or("mp4").to_string()
+    };
+    let approx_size = formats.iter().map(|f| f.size).sum::<Option<u64>>();
+    Ok(Resolved { title, ext, formats, approx_size, qualities: qualities_of(v) })
+}
+
+/// Pick a quality from an already-fetched format list (no yt-dlp run).
+/// Returns `None` when unsure, so the caller falls back to yt-dlp.
+fn local_select(v: &Value, quality: &str, ffmpeg: bool) -> Option<Resolved> {
+    let list = v.get("formats")?.as_array()?;
+    let is_none = |f: &Value, k: &str| f.get(k).and_then(Value::as_str) == Some("none");
+    let http = |f: &Value| matches!(f.get("protocol").and_then(Value::as_str), Some("https" | "http"));
+    let ext = |f: &Value| f.get("ext").and_then(Value::as_str).unwrap_or("").to_string();
+    let num = |f: &Value, k: &str| f.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+    let best = |it: Vec<&Value>, key: &dyn Fn(&Value) -> (f64, f64)| -> Option<Value> {
+        it.into_iter()
+            .max_by(|a, b| key(a).partial_cmp(&key(b)).unwrap_or(std::cmp::Ordering::Equal))
+            .cloned()
+    };
+    let audio = || {
+        best(
+            list.iter().filter(|f| is_none(f, "vcodec") && !is_none(f, "acodec") && http(f)).collect(),
+            &|f| (if ext(f) == "m4a" { 1.0 } else { 0.0 }, num(f, "abr").max(num(f, "tbr"))),
+        )
+    };
+    let pick = |fs: Vec<Value>| {
+        let exts: Vec<String> = fs.iter().map(&ext).collect();
+        let exts: Vec<&str> = exts.iter().map(String::as_str).collect();
+        finish(v, fs.iter().filter_map(format_of).collect(), &exts).ok()
+    };
+    if quality == "audio" {
+        return pick(vec![audio()?]);
+    }
+    let h: f64 = quality.parse().ok()?;
+    let fits = |f: &Value| !is_none(f, "vcodec") && f.get("height").and_then(Value::as_f64).is_some_and(|x| x <= h) && http(f);
+    let rank = |f: &Value| (num(f, "height"), num(f, "tbr"));
+    if ffmpeg {
+        let vid = best(list.iter().filter(|f| fits(f) && is_none(f, "acodec") && ext(f) == "mp4").collect(), &rank);
+        if let (Some(vid), Some(aud)) = (vid, audio()) {
+            return pick(vec![vid, aud]);
         }
     }
+    let prog = best(list.iter().filter(|f| fits(f) && !is_none(f, "acodec")).collect(), &rank)?;
+    pick(vec![prog])
+}
+
+async fn run_ytdlp(url: &str, quality: Option<&str>) -> Result<Resolved, String> {
     let ytdlp = tools::ytdlp().ok_or("yt-dlp is not installed")?;
     let ffmpeg = tools::ffmpeg();
     let mut cmd = tools::command(&ytdlp);
@@ -186,43 +247,64 @@ pub(crate) async fn resolve(url: &str, quality: Option<&str>) -> Result<Resolved
         return Err(line.trim_start_matches("ERROR: ").chars().take(300).collect());
     }
     let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("yt-dlp output: {e}"))?;
-    let title = v.get("title").and_then(Value::as_str).unwrap_or("video").to_string();
-    let formats: Vec<Format> = match v.get("requested_formats").and_then(Value::as_array) {
-        Some(list) if !list.is_empty() => list
-            .iter()
-            .filter_map(format_of)
-            .collect(),
-        _ => vec![format_of(&v).ok_or("no downloadable format")?],
+    let (formats, exts): (Vec<Format>, Vec<String>) = match v.get("requested_formats").and_then(Value::as_array) {
+        Some(list) if !list.is_empty() => (
+            list.iter().filter_map(format_of).collect(),
+            list.iter().map(|f| f.get("ext").and_then(Value::as_str).unwrap_or("").to_string()).collect(),
+        ),
+        _ => (
+            vec![format_of(&v).ok_or("no downloadable format")?],
+            vec![v.get("ext").and_then(Value::as_str).unwrap_or("mp4").to_string()],
+        ),
     };
-    if formats.is_empty() {
-        return Err("no downloadable format".into());
-    }
-    let exts: Vec<&str> = v
-        .get("requested_formats")
-        .and_then(Value::as_array)
-        .map(|l| l.iter().filter_map(|f| f.get("ext").and_then(Value::as_str)).collect())
-        .unwrap_or_default();
-    let ext = if formats.len() > 1 {
-        if exts.iter().all(|e| matches!(*e, "mp4" | "m4a")) {
-            "mp4"
-        } else {
-            "mkv"
-        }
-    } else {
-        v.get("ext").and_then(Value::as_str).unwrap_or("mp4")
-    }
-    .to_string();
-    let approx_size = formats.iter().map(|f| f.size).sum::<Option<u64>>();
-    let qualities = qualities_of(&v);
-    let r = Resolved { title, ext, formats, approx_size, qualities };
-    CACHE.lock().get_or_insert_with(HashMap::new).insert(key, (Instant::now(), r.clone()));
+    let exts: Vec<&str> = exts.iter().map(String::as_str).collect();
+    let r = finish(&v, formats, &exts)?;
+    RAW.lock().get_or_insert_with(HashMap::new).insert(url.to_string(), (Instant::now(), Arc::new(v)));
     Ok(r)
+}
+
+pub(crate) async fn resolve(url: &str, quality: Option<&str>) -> Result<Resolved, String> {
+    let key = format!("{url}#{}", quality.unwrap_or("best"));
+    if let Some((t, r)) = CACHE.lock().get_or_insert_with(HashMap::new).get(&key) {
+        if t.elapsed() < TTL {
+            return Ok(r.clone());
+        }
+    }
+    // Another quality of a page we already know: choose locally, instantly.
+    if let Some(q) = quality {
+        let raw = RAW.lock().get_or_insert_with(HashMap::new).get(url).filter(|(t, _)| t.elapsed() < TTL).map(|(_, v)| v.clone());
+        if let Some(r) = raw.and_then(|v| local_select(&v, q, tools::ffmpeg().is_some())) {
+            CACHE.lock().get_or_insert_with(HashMap::new).insert(key, (Instant::now(), r.clone()));
+            return Ok(r);
+        }
+    }
+    let cell: Shared = INFLIGHT.lock().get_or_insert_with(HashMap::new).entry(key.clone()).or_default().clone();
+    let r = cell.get_or_init(|| run_ytdlp(url, quality)).await.clone();
+    INFLIGHT.lock().get_or_insert_with(HashMap::new).remove(&key);
+    if let Ok(r) = &r {
+        CACHE.lock().get_or_insert_with(HashMap::new).insert(key, (Instant::now(), r.clone()));
+    }
+    r
+}
+
+/// Warm the cache for a page the user is looking at (called by the extension).
+pub(crate) fn prefetch(url: &str) {
+    if !is_site_url(url) || tools::ytdlp().is_none() {
+        return;
+    }
+    let url = url.to_string();
+    tokio::spawn(async move {
+        let _ = resolve(&url, None).await;
+    });
 }
 
 pub(crate) fn forget(url: &str) {
     if let Some(m) = CACHE.lock().as_mut() {
         let prefix = format!("{url}#");
         m.retain(|k, _| !k.starts_with(&prefix));
+    }
+    if let Some(m) = RAW.lock().as_mut() {
+        m.remove(url);
     }
 }
 
@@ -436,5 +518,30 @@ mod tests {
         assert!(!is_site_url("https://example.com/video.mp4"));
         assert!(is_site_url("https://x.com/NASA/status/1234567890"));
         assert!(!is_site_url("https://x.com/home"));
+    }
+
+    #[test]
+    fn picks_quality_locally() {
+        let yt = serde_json::json!({"title": "t", "formats": [
+            {"format_id": "a", "url": "https://x/a", "protocol": "https", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "abr": 128.0, "filesize": 100},
+            {"format_id": "v1", "url": "https://x/v1", "protocol": "https", "ext": "mp4", "vcodec": "avc1", "acodec": "none", "height": 1080, "tbr": 4000.0, "filesize": 1000},
+            {"format_id": "v2", "url": "https://x/v2", "protocol": "https", "ext": "mp4", "vcodec": "avc1", "acodec": "none", "height": 480, "tbr": 900.0, "filesize": 300}
+        ]});
+        let r = local_select(&yt, "720", true).unwrap();
+        assert_eq!(r.formats.len(), 2);
+        assert_eq!(r.formats[0].url, "https://x/v2");
+        assert_eq!(r.ext, "mp4");
+        assert_eq!(r.approx_size, Some(400));
+        let a = local_select(&yt, "audio", true).unwrap();
+        assert_eq!(a.formats[0].url, "https://x/a");
+        assert_eq!(a.ext, "m4a");
+        // X: progressive MP4s with unknown codecs.
+        let x = serde_json::json!({"title": "t", "formats": [
+            {"url": "https://x/632", "protocol": "https", "ext": "mp4", "height": 400, "tbr": 632.0},
+            {"url": "https://x/2176", "protocol": "https", "ext": "mp4", "height": 800, "tbr": 2176.0},
+            {"url": "https://x/hls", "protocol": "m3u8_native", "ext": "mp4", "height": 800, "vcodec": "avc1", "acodec": "none"}
+        ]});
+        assert_eq!(local_select(&x, "450", true).unwrap().formats[0].url, "https://x/632");
+        assert_eq!(local_select(&x, "1080", true).unwrap().formats[0].url, "https://x/2176");
     }
 }

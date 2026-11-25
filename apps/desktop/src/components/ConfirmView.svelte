@@ -9,7 +9,7 @@
   import { i18n, t } from "../lib/i18n.svelte";
   import { bytes, host } from "../lib/format";
 
-  let { token }: { token: string } = $props();
+  let { token, onclose }: { token: string; onclose?: () => void } = $props();
   const win = getCurrentWindow();
 
   let req = $state<AddRequest | null>(null);
@@ -57,7 +57,8 @@
       busy = false;
       return;
     }
-    win.close();
+    onclose?.();
+    await api.confirmDone();
   }
 
   async function pick() {

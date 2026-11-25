@@ -21,6 +21,8 @@ pub struct AppState {
     pending: Mutex<HashMap<String, AddRequest>>,
     host_registered: bool,
     tray_items: Mutex<Vec<(&'static str, MenuItem<tauri::Wry>)>>,
+    /// The pre-built hidden confirm window is currently showing a download.
+    confirm_busy: std::sync::atomic::AtomicBool,
 }
 
 /// UI language for native surfaces (tray, notifications): setting or OS locale.
@@ -104,15 +106,54 @@ pub fn open_progress_window(app: &AppHandle, id: &str) {
 }
 
 /// A download handed to us by the browser extension.
+const CONFIRM_POOL: &str = "confirm-pool";
+const CONFIRM_W: f64 = 560.0;
+const CONFIRM_H: f64 = 456.0;
+
+/// Build the confirm window ahead of time (hidden) so a captured download
+/// pops up instantly instead of waiting for a WebView to boot.
+fn prewarm_confirm(app: &AppHandle) {
+    if app.get_webview_window(CONFIRM_POOL).is_some() {
+        return;
+    }
+    let url = WebviewUrl::App("index.html#/confirm/pool".into());
+    let res = WebviewWindowBuilder::new(app, CONFIRM_POOL, url)
+        .title("Velox")
+        .inner_size(CONFIRM_W, CONFIRM_H)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(false)
+        .visible(false)
+        .background_color(tauri::window::Color(10, 10, 10, 255))
+        .build();
+    if let Err(e) = res {
+        tracing::error!("confirm pool: {e}");
+    }
+}
+
 pub async fn capture(app: &AppHandle, req: AddRequest, silent: bool) {
     let state = app.state::<AppState>();
     if state.engine.settings().confirm_new && !silent {
         let token = uuid::Uuid::new_v4().simple().to_string();
         state.pending.lock().insert(token.clone(), req);
+        // Fast path: reuse the pre-built window.
+        if let Some(w) = app.get_webview_window(CONFIRM_POOL) {
+            if !state.confirm_busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let _ = w.emit("confirm-load", token.clone());
+                let _ = w.center();
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+                return;
+            }
+        }
         let url = WebviewUrl::App(format!("index.html#/confirm/{token}").into());
         let res = WebviewWindowBuilder::new(app, format!("confirm-{token}"), url)
             .title("Velox")
-            .inner_size(560.0, 456.0)
+            .inner_size(CONFIRM_W, CONFIRM_H)
             .resizable(false)
             .maximizable(false)
             .minimizable(false)
@@ -358,6 +399,19 @@ async fn show_progress(app: AppHandle, id: String) -> R<()> {
     Ok(())
 }
 
+/// Called by the confirm view when it is done: the pooled window hides and
+/// waits for the next download, one-off windows close.
+#[tauri::command]
+async fn confirm_done(window: tauri::WebviewWindow, s: State<'_, AppState>) -> R<()> {
+    if window.label() == CONFIRM_POOL {
+        let _ = window.hide();
+        s.confirm_busy.store(false, std::sync::atomic::Ordering::SeqCst);
+    } else {
+        let _ = window.close();
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn quit(app: AppHandle) -> R<()> {
     app.state::<AppState>().engine.pause_all();
@@ -488,6 +542,7 @@ fn main() {
                 pending: Mutex::new(HashMap::new()),
                 host_registered,
                 tray_items: Mutex::new(Vec::new()),
+                confirm_busy: std::sync::atomic::AtomicBool::new(false),
             });
 
             let handle = app.handle().clone();
@@ -496,6 +551,7 @@ fn main() {
             clipboard::spawn(handle.clone());
             tauri::async_runtime::spawn(ipc::serve(handle.clone()));
 
+            prewarm_confirm(&handle);
             if !background {
                 show_main(&handle);
             }
@@ -503,6 +559,13 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == CONFIRM_POOL {
+                    // Alt+F4 etc.: keep the pooled window, just hide it.
+                    api.prevent_close();
+                    let _ = window.hide();
+                    window.app_handle().state::<AppState>().confirm_busy.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
                 if window.label() == "main" {
                     let state = window.app_handle().state::<AppState>();
                     if state.engine.settings().close_to_tray {
@@ -537,6 +600,7 @@ fn main() {
             check_update,
             install_update,
             read_clipboard,
+            confirm_done,
             tools_status,
             install_tools,
             show_progress,

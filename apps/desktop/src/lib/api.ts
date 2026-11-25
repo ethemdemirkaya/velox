@@ -153,6 +153,7 @@ export const api = {
   checkUpdate: () => invoke<string | null>("check_update"),
   installUpdate: () => invoke<void>("install_update"),
   quit: () => invoke<void>("quit"),
+  confirmDone: () => invoke<void>("confirm_done"),
   toolsStatus: () => invoke<ToolsStatus>("tools_status"),
   installTools: () => invoke<ToolsStatus>("install_tools"),
   showProgress: (id: string) => invoke<void>("show_progress", { id }),

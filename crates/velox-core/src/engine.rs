@@ -359,6 +359,12 @@ impl Engine {
         })
     }
 
+    /// Resolve a video page in the background so the download dialog is
+    /// instant when the user clicks (called when a video page is opened).
+    pub fn prefetch(&self, url: &str) {
+        site::prefetch(url);
+    }
+
     /// Inspect a URL without adding it (used by the confirm dialog).
     pub async fn probe(&self, req: AddRequest) -> Result<ProbeInfo, String> {
         let r = self.resolve(&req).await?;

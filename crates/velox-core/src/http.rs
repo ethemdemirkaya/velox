@@ -15,7 +15,7 @@ use reqwest::{Client, StatusCode};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -24,7 +24,7 @@ use crate::types::{Kind, Segment};
 use crate::util;
 
 /// Below this many remaining bytes a segment is not split any further.
-const MIN_SPLIT: u64 = 1024 * 1024;
+const MIN_SPLIT: u64 = 512 * 1024;
 /// Initial segments are never smaller than this.
 const MIN_SEGMENT: u64 = 1024 * 1024;
 /// Bytes buffered per connection before a positional write (fewer syscalls
@@ -40,7 +40,7 @@ const RAMP_EVERY: Duration = Duration::from_millis(100);
 /// replaced by a fresh one (often landing on a faster CDN node).
 const SLOW_TICKS: u8 = 3;
 /// Only replace slow connections that still have this much left to fetch.
-const SLOW_MIN_REMAINING: u64 = 4 * 1024 * 1024;
+const SLOW_MIN_REMAINING: u64 = 128 * 1024;
 pub const UNKNOWN: u64 = u64::MAX;
 
 #[derive(Debug, thiserror::Error, Clone)]
@@ -94,6 +94,9 @@ pub(crate) struct SegState {
     pub last: u64,
     /// Consecutive ticks this connection was a straggler.
     pub slow: u8,
+    /// Speed ticks since this connection started (young ones are still in
+    /// TCP slow start and must not be judged or used as reference).
+    pub age: u8,
 }
 
 /// Live state shared between the engine (UI ticker) and the download task.
@@ -108,6 +111,9 @@ pub(crate) struct Live {
     pub hls_done: AtomicU64,
     pub hls_count: AtomicU64,
     pub hls_bytes: AtomicU64,
+    /// Typical bytes/second of one healthy connection (median while several
+    /// run) – lets a lone straggler at the end still be detected.
+    pub typical: AtomicU64,
 }
 
 impl Live {
@@ -126,6 +132,7 @@ impl Live {
             hls_done: AtomicU64::new(0),
             hls_count: AtomicU64::new(0),
             hls_bytes: AtomicU64::new(0),
+            typical: AtomicU64::new(0),
         }
     }
 
@@ -315,7 +322,14 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
     let mut set: JoinSet<Result<WorkerEnd, DlError>> = JoinSet::new();
     let spawn = |set: &mut JoinSet<Result<WorkerEnd, DlError>>, idx: usize| {
         let (ctx, file, tok) = (ctx.clone(), file.clone(), child.clone());
-        ctx.live.segments.lock()[idx].active = true;
+        {
+            let mut segs = ctx.live.segments.lock();
+            let s = &mut segs[idx];
+            s.active = true;
+            s.last = s.reserved;
+            s.age = 0;
+            s.slow = 0;
+        }
         ctx.live.active.fetch_add(1, Ordering::Relaxed);
         set.spawn(async move {
             let r = worker(&ctx, idx, &file, &tok).await;
@@ -331,8 +345,9 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
             break;
         }
         let idle = {
-            let segs = ctx.live.segments.lock();
-            segs.iter().position(|s| !s.active && s.written < s.end)
+            let mut segs = ctx.live.segments.lock();
+            let free = (limit as usize).saturating_sub(ctx.live.active.load(Ordering::Relaxed) as usize).max(1);
+            claim_idle(&mut segs, free)
         };
         match idle.or_else(|| if segmented { steal(&ctx.live) } else { None }) {
             Some(i) => spawn(set, i),
@@ -340,11 +355,15 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
         }
     };
 
-    // Adaptive connection limit: servers that cap connections per IP make
-    // extra workers yield; we settle at what the server tolerates.
-    let mut limit = ctx.max_conns.max(1);
-    // Ramp up gently (2 connections, +2 every 150 ms). Opening 16+ sockets in
-    // the same instant trips connection-rate limits on many servers.
+    // Connection count follows AIMD (like TCP congestion control): when the
+    // server refuses connections the limit drops to what is actually working
+    // (at most once per second, never below 2); after 3 quiet seconds it grows
+    // by one again. The download
+    // settles at whatever the server tolerates instead of collapsing to 1.
+    let max = ctx.max_conns.max(1);
+    let mut limit = max;
+    let mut last_cut = Instant::now() - Duration::from_secs(10);
+    let mut last_yield = Instant::now() - Duration::from_secs(10);
     let mut ramp = RAMP_START.min(limit);
     refill(&mut set, ramp);
     let mut tick = tokio::time::interval(RAMP_EVERY);
@@ -367,10 +386,16 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
                         continue;
                     }
                     Ok(WorkerEnd::Yield) => {
-                        let active = ctx.live.active.load(Ordering::Relaxed).max(1);
-                        limit = active.min(limit);
-                        ramp = ramp.min(limit);
-                        tracing::debug!("connection yielded, limit now {limit}");
+                        last_yield = Instant::now();
+                        if last_cut.elapsed() >= Duration::from_secs(1) {
+                            last_cut = Instant::now();
+                            // Converge in one step to what is actually working
+                            // (+1 to keep probing), never below 2.
+                            let working = ctx.live.active.load(Ordering::Relaxed);
+                            limit = (limit - limit / 4).min((working + 1).max(2)).max(2).min(max);
+                            ramp = ramp.min(limit);
+                            tracing::debug!("server refused a connection, limit now {limit}");
+                        }
                     }
                     Ok(WorkerEnd::Done) => {}
                 }
@@ -386,6 +411,15 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
             }
             _ = speed_tick.tick(), if segmented && first_err.is_none() => {
                 flag_stragglers(&ctx.live);
+                // Additive increase once the server has been quiet for a while.
+                if limit < max && last_yield.elapsed() >= Duration::from_secs(2) && last_cut.elapsed() >= Duration::from_secs(2) {
+                    limit += 1;
+                    ramp = limit;
+                    last_cut = Instant::now();
+                    if !child.is_cancelled() {
+                        refill(&mut set, ramp);
+                    }
+                }
             }
         }
     }
@@ -416,33 +450,73 @@ pub(crate) async fn run(ctx: Arc<Ctx>, part: PathBuf) -> Result<u64, DlError> {
     Ok(size)
 }
 
+/// Pick the next idle segment for a new connection. When there are more idle
+/// segments than free connection slots, the untouched neighbours are merged
+/// into it so one request covers them: servers that throttle every new
+/// request (common on CDN mirrors) then see a few long transfers instead of
+/// dozens of short ones. Work stealing splits them again if slots open up.
+fn claim_idle(segs: &mut [SegState], free: usize) -> Option<usize> {
+    let i = segs.iter().position(|s| !s.active && s.written < s.end)?;
+    let idle = segs.iter().filter(|s| !s.active && s.written < s.end).count();
+    let mut take = idle.div_ceil(free).saturating_sub(1);
+    let mut end = segs[i].end;
+    while take > 0 {
+        let Some(j) = segs.iter().position(|s| s.start == end && !s.active && s.written == s.start && s.end > s.start) else {
+            break;
+        };
+        end = segs[j].end;
+        segs[j].end = segs[j].start; // absorbed: zero-length, counts as done
+        take -= 1;
+    }
+    segs[i].end = end;
+    Some(i)
+}
+
 /// Mark connections that lag far behind the median for replacement.
 fn flag_stragglers(live: &Live) {
+    const MATURE: u8 = 2;
     let mut segs = live.segments.lock();
-    let mut deltas: Vec<u64> = Vec::new();
-    for s in segs.iter_mut().filter(|s| s.active) {
-        deltas.push(s.reserved.saturating_sub(s.last));
-    }
-    if deltas.len() < 3 {
-        for s in segs.iter_mut() {
-            s.last = s.reserved;
+    let mut deltas: Vec<u64> =
+        segs.iter().filter(|s| s.active && s.age >= MATURE).map(|s| s.reserved.saturating_sub(s.last)).collect();
+    // Reference speed of a healthy connection: median of the mature ones,
+    // remembered (decaying slowly) so a lone straggler at the end is caught.
+    let prev = live.typical.load(Ordering::Relaxed);
+    // No mature connections yet (fast servers finish segments quickly):
+    // fall back to the average speed of everything currently running.
+    let active: Vec<u64> = segs.iter().filter(|s| s.active).map(|s| s.reserved.saturating_sub(s.last)).collect();
+    let candidate = if deltas.len() >= 3 {
+        deltas.sort_unstable();
+        Some(deltas[deltas.len() / 2])
+    } else if active.len() >= 3 {
+        Some(active.iter().sum::<u64>() / active.len() as u64)
+    } else {
+        None
+    };
+    let reference = match candidate {
+        Some(c) => {
+            let r = c.max(prev - prev / 10);
+            live.typical.store(r, Ordering::Relaxed);
+            r
         }
-        return;
-    }
-    deltas.sort_unstable();
-    let median = deltas[deltas.len() / 2];
+        None => prev,
+    };
     for s in segs.iter_mut() {
         let delta = s.reserved.saturating_sub(s.last);
         s.last = s.reserved;
-        if !s.active || s.end == UNKNOWN || s.end.saturating_sub(s.reserved) < SLOW_MIN_REMAINING || median < 256 * 1024 {
+        if !s.active {
+            continue;
+        }
+        s.age = s.age.saturating_add(1);
+        if s.age <= MATURE || s.end == UNKNOWN || s.end.saturating_sub(s.reserved) < SLOW_MIN_REMAINING || reference < 256 * 1024 {
             s.slow = 0;
             continue;
         }
-        if delta * 4 < median {
+        if delta * 4 < reference {
             s.slow += 1;
             if s.slow >= SLOW_TICKS {
                 s.slow = 0;
                 s.restart = true;
+                s.age = 0;
             }
         } else {
             s.slow = 0;
@@ -531,6 +605,7 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
             },
         };
         let mut reconnect = false;
+        let mut retry_after: Option<u64> = None;
         let outcome: Result<bool, DlError> = async {
             let resp = resp?;
             let st = resp.status();
@@ -541,6 +616,13 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
                 return Err(DlError::RangeIgnored);
             }
             if !st.is_success() {
+                if matches!(st.as_u16(), 429 | 503) {
+                    retry_after = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.trim().parse::<u64>().ok());
+                }
                 return Err(DlError::Http(st.as_u16()));
             }
             let mut stream = resp.bytes_stream();
@@ -645,7 +727,10 @@ async fn worker(ctx: &Ctx, idx: usize, file: &Arc<std::fs::File>, cancel: &Cance
         }
         attempt += 1;
         rotation += 1;
-        let backoff = Duration::from_millis((400u64 << attempt.min(5)).min(10_000));
+        let backoff = match retry_after {
+            Some(secs) => Duration::from_secs(secs.min(30)),
+            None => Duration::from_millis((400u64 << attempt.min(5)).min(10_000)),
+        };
         tokio::select! {
             _ = cancel.cancelled() => return Err(DlError::Cancelled),
             _ = tokio::time::sleep(backoff) => {}
