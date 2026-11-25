@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Velox — Download Accelerator",
   "short_name": "Velox",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Send downloads and video streams to Velox, the blazing-fast open-source download manager.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA6ZhRIrP4JpX55s0vUNnrHeQToIsK3DcPk6jUWFKp3FerdZOlUdgJVZwgdmQDU6Eqtb/qfg8uyHFeEYLpmiweislqGjzgP7Umm1CIHoAVNCdQ+iW3L9fRrveusLuMWhlvmUVHs/qCOADfRqNy66OUaWzW+naWErgfRgffljXhrRBOAkRttCuXN6BcXNZ55KnayKH/iYu4joVuGJu7QDijaOVe2PQisBwOVN1qYdAiWRCEY5MSNREwYg8UaKVvA5wb6YdeVlGe77LE0WZ9esBqcAOIarOe/J/JrhWTTcDG16OdPgb0GekcSIVKtFUYghAoKjm5DubwG8KQv4ZZFmP31QIDAQAB",
   "minimum_chrome_version": "116",

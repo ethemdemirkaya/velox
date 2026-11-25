@@ -30,6 +30,11 @@ fn manifest(host: &Path) -> String {
 
 /// Returns true when the host is registered.
 pub fn register() -> bool {
+    // Development builds must never take over the browser bridge from the
+    // installed app (their UI is served by a dev server that may be down).
+    if cfg!(debug_assertions) {
+        return host_exe().is_some();
+    }
     let Some(host) = host_exe() else {
         tracing::warn!("velox-host binary not found next to the app; browser integration disabled");
         return false;
